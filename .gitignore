@@ -12,3 +12,7 @@ build/
 coverage.xml
 *.log
 target/
+
+# Large demo artifacts (generated)
+demo/huge_*.json
+demo/*.result.json

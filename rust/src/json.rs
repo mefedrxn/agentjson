@@ -104,7 +104,7 @@ pub fn parse_strict_json(input: &str) -> Result<JsonValue, JsonError> {
     let mut i: usize = 0;
 
     skip_ws(bytes, &mut i);
-    let v = parse_value(bytes, &mut i)?;
+    let v = parse_value(input, bytes, &mut i)?;
     skip_ws(bytes, &mut i);
     if i != bytes.len() {
         return Err(JsonError {
@@ -124,7 +124,7 @@ fn skip_ws(bytes: &[u8], i: &mut usize) {
     }
 }
 
-fn parse_value(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
+fn parse_value(input: &str, bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
     if *i >= bytes.len() {
         return Err(JsonError {
             message: "unexpected EOF".to_string(),
@@ -136,11 +136,11 @@ fn parse_value(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
         b't' => parse_literal(bytes, i, b"true", JsonValue::Bool(true)),
         b'f' => parse_literal(bytes, i, b"false", JsonValue::Bool(false)),
         b'"' => {
-            let s = parse_string(bytes, i)?;
+            let s = parse_string(input, bytes, i)?;
             Ok(JsonValue::String(s))
         }
-        b'{' => parse_object(bytes, i),
-        b'[' => parse_array(bytes, i),
+        b'{' => parse_object(input, bytes, i),
+        b'[' => parse_array(input, bytes, i),
         b'-' | b'0'..=b'9' => parse_number(bytes, i),
         _ => Err(JsonError {
             message: format!("unexpected byte: {}", bytes[*i]),
@@ -166,7 +166,7 @@ fn parse_literal(bytes: &[u8], i: &mut usize, lit: &[u8], v: JsonValue) -> Resul
     Ok(v)
 }
 
-fn parse_string(bytes: &[u8], i: &mut usize) -> Result<String, JsonError> {
+fn parse_string(input: &str, bytes: &[u8], i: &mut usize) -> Result<String, JsonError> {
     let start = *i;
     if bytes.get(*i) != Some(&b'"') {
         return Err(JsonError {
@@ -248,9 +248,21 @@ fn parse_string(bytes: &[u8], i: &mut usize) -> Result<String, JsonError> {
             }
             continue;
         }
-        // UTF-8 char
-        let s = std::str::from_utf8(&bytes[*i..]).map_err(|_| JsonError {
-            message: "invalid utf-8".to_string(),
+        if b < 0x20 {
+            return Err(JsonError {
+                message: "control character in string".to_string(),
+                pos: *i,
+            });
+        }
+        // Fast path ASCII.
+        if b < 0x80 {
+            out.push(b as char);
+            *i += 1;
+            continue;
+        }
+        // UTF-8 char (input is valid UTF-8 already; avoid re-validating the remainder).
+        let s = input.get(*i..).ok_or(JsonError {
+            message: "invalid utf-8 boundary".to_string(),
             pos: *i,
         })?;
         let mut it = s.chars();
@@ -353,7 +365,7 @@ fn parse_number(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
     Ok(JsonValue::NumberF64(n))
 }
 
-fn parse_array(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
+fn parse_array(input: &str, bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
     if bytes.get(*i) != Some(&b'[') {
         return Err(JsonError {
             message: "expected array".to_string(),
@@ -369,7 +381,7 @@ fn parse_array(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
     }
     loop {
         skip_ws(bytes, i);
-        let v = parse_value(bytes, i)?;
+        let v = parse_value(input, bytes, i)?;
         out.push(v);
         skip_ws(bytes, i);
         match bytes.get(*i) {
@@ -398,7 +410,7 @@ fn parse_array(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
     Ok(JsonValue::Array(out))
 }
 
-fn parse_object(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
+fn parse_object(input: &str, bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
     if bytes.get(*i) != Some(&b'{') {
         return Err(JsonError {
             message: "expected object".to_string(),
@@ -415,7 +427,7 @@ fn parse_object(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
     loop {
         skip_ws(bytes, i);
         let key = match bytes.get(*i) {
-            Some(b'"') => parse_string(bytes, i)?,
+            Some(b'"') => parse_string(input, bytes, i)?,
             _ => {
                 return Err(JsonError {
                     message: "expected object key string".to_string(),
@@ -432,7 +444,7 @@ fn parse_object(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
         }
         *i += 1;
         skip_ws(bytes, i);
-        let v = parse_value(bytes, i)?;
+        let v = parse_value(input, bytes, i)?;
         out.push((key, v));
         skip_ws(bytes, i);
         match bytes.get(*i) {

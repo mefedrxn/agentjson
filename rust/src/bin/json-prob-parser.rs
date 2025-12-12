@@ -13,6 +13,7 @@ fn parse_f64(arg: &str, name: &str) -> f64 {
 
 fn main() {
     let mut mode = "auto".to_string();
+    let mut scale_output = "dom".to_string();
     let mut top_k: usize = 5;
     let mut beam_width: usize = 32;
     let mut max_repairs: usize = 20;
@@ -47,6 +48,10 @@ fn main() {
             "--mode" => {
                 i += 1;
                 mode = args.get(i).expect("missing --mode value").to_string();
+            }
+            "--scale-output" => {
+                i += 1;
+                scale_output = args.get(i).expect("missing --scale-output value").to_string();
             }
             "--top-k" => {
                 i += 1;
@@ -159,6 +164,7 @@ fn main() {
 
     let mut opt = RepairOptions::default();
     opt.mode = mode;
+    opt.scale_output = scale_output;
     opt.top_k = top_k;
     opt.beam_width = beam_width;
     opt.max_repairs = max_repairs;

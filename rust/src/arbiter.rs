@@ -130,7 +130,6 @@ pub fn parse(input_text: &str, options: &RepairOptions) -> RepairResult {
 
 pub fn parse_bytes(input_bytes: &[u8], options: &RepairOptions) -> RepairResult {
     let t0 = Instant::now();
-    let text = String::from_utf8_lossy(input_bytes).to_string();
     let input_size = input_bytes.len();
 
     if options.mode == "scale_pipeline" {
@@ -178,7 +177,7 @@ pub fn parse_bytes(input_bytes: &[u8], options: &RepairOptions) -> RepairResult 
                         best_index: Some(0),
                         input_stats: InputStats {
                             input_bytes: input_size,
-                            extracted_span: (0, text.len()),
+                            extracted_span: (0, input_size),
                             prefix_skipped_bytes: 0,
                             suffix_skipped_bytes: 0,
                         },
@@ -196,7 +195,7 @@ pub fn parse_bytes(input_bytes: &[u8], options: &RepairOptions) -> RepairResult 
                         best_index: None,
                         input_stats: InputStats {
                             input_bytes: input_size,
-                            extracted_span: (0, text.len()),
+                            extracted_span: (0, input_size),
                             prefix_skipped_bytes: 0,
                             suffix_skipped_bytes: 0,
                         },
@@ -254,7 +253,7 @@ pub fn parse_bytes(input_bytes: &[u8], options: &RepairOptions) -> RepairResult 
                     best_index: Some(0),
                     input_stats: InputStats {
                         input_bytes: input_size,
-                        extracted_span: (0, text.len()),
+                        extracted_span: (0, input_size),
                         prefix_skipped_bytes: 0,
                         suffix_skipped_bytes: 0,
                     },
@@ -272,7 +271,7 @@ pub fn parse_bytes(input_bytes: &[u8], options: &RepairOptions) -> RepairResult 
                     best_index: None,
                     input_stats: InputStats {
                         input_bytes: input_size,
-                        extracted_span: (0, text.len()),
+                        extracted_span: (0, input_size),
                         prefix_skipped_bytes: 0,
                         suffix_skipped_bytes: 0,
                     },
@@ -293,6 +292,7 @@ pub fn parse_bytes(input_bytes: &[u8], options: &RepairOptions) -> RepairResult 
         }
     }
 
+    let text = String::from_utf8_lossy(input_bytes).to_string();
     let extraction = extract_json_candidate(&text);
     let extracted = extraction.extracted.clone();
     let input_stats = InputStats {
