@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.5"]
+build-backend = "maturin"
+
+[project]
+name = "json-prob-parser-rust"
+version = "0.1.0"
+description = "PyO3 bindings for json-prob-parser (Rust core)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "json_prob_parser_rust"
+

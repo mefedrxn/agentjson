@@ -159,8 +159,7 @@ fn root_array_split_plan(
     let mut structural: usize = 0;
     let mut in_string = false;
     let mut escape = false;
-    for i in start..end {
-        let ch = data[i];
+    for &ch in &data[start..end] {
         if in_string {
             if escape {
                 escape = false;
@@ -300,10 +299,8 @@ pub fn parse_root_array_scale(data: &[u8], opt: &RepairOptions) -> Result<(JsonV
 
     let mut out: Vec<JsonValue> = Vec::new();
     let r = results.lock().map_err(|_| "mutex poisoned".to_string())?;
-    for chunk in r.iter() {
-        if let Some(vs) = chunk {
-            out.extend_from_slice(vs);
-        }
+    for vs in r.iter().flatten() {
+        out.extend_from_slice(vs);
     }
     Ok((JsonValue::Array(out), plan))
 }

@@ -1,0 +1,41 @@
+```json
+{
+  "users": [
+    {
+      name: "Alice",
+      'age': 30,
+      "email": "alice@example.com",
+      "active": True,
+      "roles": ["admin", "user",]
+    },
+    {
+      "name": "Bob",
+      "age": 25
+      "email": 'bob@example.com',
+      "active": False,
+      "roles": ["user"]
+    },
+    {
+      "name": "Charlie",
+      "age": 35,
+      "email": "charlie@example.com",
+      "active": true,
+      "roles": ["editor", "moderator"]
+    }
+  ],
+  "settings": {
+    "theme": 'dark',
+    "notifications": True,
+    "language": "en",
+  },
+  "statistics": {
+    "total_users": 3,
+    "active_users": 2
+    "inactive_users": 1
+  },
+  api_config: {
+    "base_url": "https://api.example.com",
+    "version": "v2"
+  }
+}
+```

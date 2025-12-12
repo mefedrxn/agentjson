@@ -6,7 +6,7 @@ import sys
 from dataclasses import asdict
 from typing import Optional
 
-from .arbiter import parse
+from .rust_core import parse
 from .types import RepairOptions
 
 

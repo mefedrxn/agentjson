@@ -957,30 +957,28 @@ pub fn probabilistic_repair(extracted_text: &str, opt: &RepairOptions, base_repa
                 continue;
             }
 
-            if s.root_done && s.stack.is_empty() && tok.typ != TokenType::Eof {
-                if tok.typ == TokenType::Garbage || tok.typ == TokenType::Ident {
-                    let tok_len = tok.end.saturating_sub(tok.start);
-                    if s.garbage_skipped_bytes + tok_len > opt.max_garbage_skip_bytes {
-                        continue;
-                    }
-                    let cost = 0.3 + (0.0002 * (tok_len as f64));
-                    let mut s2 = advance(s.clone(), 1);
-                    s2 = add_repair(
-                        s2,
-                        "skip_suffix",
-                        cost,
-                        Some((tok.start, tok.end)),
-                        None,
-                        None,
-                        None,
-                        0,
-                        0,
-                        tok_len,
-                        None,
-                    );
-                    next_states.push(s2);
+            if s.root_done && s.stack.is_empty() && tok.typ != TokenType::Eof && (tok.typ == TokenType::Garbage || tok.typ == TokenType::Ident) {
+                let tok_len = tok.end.saturating_sub(tok.start);
+                if s.garbage_skipped_bytes + tok_len > opt.max_garbage_skip_bytes {
                     continue;
                 }
+                let cost = 0.3 + (0.0002 * (tok_len as f64));
+                let mut s2 = advance(s.clone(), 1);
+                s2 = add_repair(
+                    s2,
+                    "skip_suffix",
+                    cost,
+                    Some((tok.start, tok.end)),
+                    None,
+                    None,
+                    None,
+                    0,
+                    0,
+                    tok_len,
+                    None,
+                );
+                next_states.push(s2);
+                continue;
             }
 
             let consumed = try_consume(s.clone(), tok, opt);

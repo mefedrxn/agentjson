@@ -30,6 +30,7 @@ pub struct CandidateValidations {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub struct CandidateDiagnostics {
     pub garbage_skipped_bytes: usize,
     pub deleted_tokens: usize,
@@ -39,18 +40,6 @@ pub struct CandidateDiagnostics {
     pub max_repairs: Option<usize>,
 }
 
-impl Default for CandidateDiagnostics {
-    fn default() -> Self {
-        Self {
-            garbage_skipped_bytes: 0,
-            deleted_tokens: 0,
-            inserted_tokens: 0,
-            close_open_string_count: 0,
-            beam_width: None,
-            max_repairs: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {

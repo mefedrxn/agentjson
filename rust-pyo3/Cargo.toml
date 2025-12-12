@@ -1,0 +1,15 @@
+[package]
+name = "json-prob-parser-pyo3"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "json_prob_parser_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+# NOTE: This crate is optional. It is not built unless you install/build the PyO3 extension.
+pyo3 = { version = "0.21", features = ["extension-module"] }
+json_prob_parser = { package = "json-prob-parser", path = "../rust" }
+

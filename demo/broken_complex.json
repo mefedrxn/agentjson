@@ -1,0 +1,96 @@
+Here is the API response:
+```json
+{
+  "database": {
+    "host": 'localhost',
+    "port": 5432,
+    "name": "myapp_production",
+    "credentials": {
+      "username": 'admin',
+      "password": "secret123"
+      "pool_size": 20
+    },
+    "replicas": [
+      { "host": "replica1.example.com", "port": 5432, },
+      { "host": 'replica2.example.com', "port": 5432 }
+    ]
+  },
+  "features": {
+    "enable_dark_mode": True,
+    "enable_notifications": true,
+    "beta_features": {
+      "ai_suggestions": True,
+      "smart_search": False,
+      "auto_tagging": None,
+    },
+    "rollout_percentage": 25,
+  },
+  "users_data": [
+    {
+      "id": 1001,
+      "name": "John Doe",
+      "email": 'john.doe@example.com',
+      "created_at": "2024-01-15T10:30:00Z"
+      "metadata": {
+        "login_count": 142,
+        "last_login": "2024-12-01T08:00:00Z",
+        "preferences": {
+          "theme": 'dark',
+          "language": "en-US",
+        }
+      },
+      "permissions": {
+        "can_read": True,
+        "can_write": True,
+        "can_delete": False
+        "can_admin": true
+      }
+    },
+    {
+      "id": 1002
+      "name": "Jane Smith",
+      'email': "jane.smith@example.com",
+      "created_at": "2024-02-20T14:45:00Z",
+      "metadata": {
+        "login_count": 89
+        "last_login": "2024-11-28T16:30:00Z",
+        "preferences": {
+          "theme": "light",
+          "language": 'fr-FR',
+        }
+      },
+      "permissions": {
+        "can_read": true,
+        "can_write": True
+        "can_delete": false,
+        "can_admin": False
+      }
+    }
+  ],
+  "api_config": {
+    "base_url": "https://api.example.com/v2",
+    "timeout_ms": 30000,
+    "retry": {
+      "max_attempts": 3,
+      "backoff_multiplier": 2.0
+      "initial_delay_ms": 1000
+    },
+  },
+  "cache_config": {
+    "enabled": True,
+    "ttl_seconds": 3600,
+    "max_entries": 10000,
+    "eviction_policy": 'lru',
+  },
+  "monitoring": {
+    "metrics_enabled": true,
+    "trace_sampling_rate": 0.1,
+    "log_level": "INFO"
+    "exporters": [
+      { "type": "prometheus", "port": 9090, },
+      { "type": 'jaeger', "endpoint": "http://jaeger:14268" }
+    ]
+  }
+}
+```
+End of response.

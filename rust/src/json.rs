@@ -297,7 +297,7 @@ fn parse_number(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
         *i += 1;
     } else if matches!(bytes[*i], b'1'..=b'9') {
         *i += 1;
-        while *i < bytes.len() && matches!(bytes[*i], b'0'..=b'9') {
+        while *i < bytes.len() && bytes[*i].is_ascii_digit() {
             *i += 1;
         }
     } else {
@@ -308,13 +308,13 @@ fn parse_number(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
     }
     if *i < bytes.len() && bytes[*i] == b'.' {
         *i += 1;
-        if *i >= bytes.len() || !matches!(bytes[*i], b'0'..=b'9') {
+        if *i >= bytes.len() || !bytes[*i].is_ascii_digit() {
             return Err(JsonError {
                 message: "invalid number".to_string(),
                 pos: start,
             });
         }
-        while *i < bytes.len() && matches!(bytes[*i], b'0'..=b'9') {
+        while *i < bytes.len() && bytes[*i].is_ascii_digit() {
             *i += 1;
         }
     }
@@ -323,13 +323,13 @@ fn parse_number(bytes: &[u8], i: &mut usize) -> Result<JsonValue, JsonError> {
         if *i < bytes.len() && (bytes[*i] == b'+' || bytes[*i] == b'-') {
             *i += 1;
         }
-        if *i >= bytes.len() || !matches!(bytes[*i], b'0'..=b'9') {
+        if *i >= bytes.len() || !bytes[*i].is_ascii_digit() {
             return Err(JsonError {
                 message: "invalid number".to_string(),
                 pos: start,
             });
         }
-        while *i < bytes.len() && matches!(bytes[*i], b'0'..=b'9') {
+        while *i < bytes.len() && bytes[*i].is_ascii_digit() {
             *i += 1;
         }
     }

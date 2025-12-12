@@ -4,8 +4,8 @@ import json
 import time
 from typing import Any, Mapping, Optional, Sequence, Tuple
 
-from .beam import probabilistic_repair
 from .llm import apply_patch_ops_utf8, build_llm_payload
+from .rust_backend import HAVE_RUST, probabilistic_repair_rust
 from .types import Candidate, RepairAction, RepairOptions
 
 
@@ -70,7 +70,13 @@ def _patch_candidates(
             note=str(p.get("patch_id") or ""),
         )
         next_base = tuple(base_repairs) + (patch_action,)
-        out.extend(probabilistic_repair(patched, opt, base_repairs=next_base))
+        if not HAVE_RUST:
+            raise RuntimeError(
+                "Rust backend not installed. Build/install the PyO3 extension:\n"
+                "  python -m pip install -U maturin\n"
+                "  maturin develop -m rust-pyo3/Cargo.toml\n"
+            )
+        out.extend(probabilistic_repair_rust(patched, opt, base_repairs=next_base))
         if len(out) >= opt.top_k:
             break
     return out

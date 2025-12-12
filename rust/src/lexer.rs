@@ -108,12 +108,12 @@ fn read_string(bytes: &[u8], mut i: usize, quote: u8) -> (Token, usize) {
 fn read_number(bytes: &[u8], mut i: usize) -> (Token, usize) {
     let start = i;
     i += 1;
-    while i < bytes.len() && matches!(bytes[i], b'0'..=b'9') {
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
         i += 1;
     }
     if i < bytes.len() && bytes[i] == b'.' {
         i += 1;
-        while i < bytes.len() && matches!(bytes[i], b'0'..=b'9') {
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
             i += 1;
         }
     }
@@ -122,7 +122,7 @@ fn read_number(bytes: &[u8], mut i: usize) -> (Token, usize) {
         if i < bytes.len() && (bytes[i] == b'+' || bytes[i] == b'-') {
             i += 1;
         }
-        while i < bytes.len() && matches!(bytes[i], b'0'..=b'9') {
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
             i += 1;
         }
     }
