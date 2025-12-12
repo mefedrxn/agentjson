@@ -16,3 +16,7 @@ target/
 # Large demo artifacts (generated)
 demo/huge_*.json
 demo/*.result.json
+
+# Local PyO3 extension artifacts (do not commit)
+src/json_prob_parser_rust*.so
+src/json_prob_parser_rust*.dylib
