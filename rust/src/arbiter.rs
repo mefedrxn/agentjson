@@ -5,7 +5,7 @@ use crate::extract::extract_json_candidate;
 use crate::heuristic::heuristic_repair;
 use crate::json::JsonValue;
 use crate::llm_arbiter::maybe_llm_rerun;
-use crate::scale::parse_root_array_scale;
+use crate::scale::{parse_root_array_scale, parse_root_array_scale_tape};
 use crate::schema::schema_match_score;
 use crate::strict::strict_parse;
 use crate::types::{
@@ -134,6 +134,88 @@ pub fn parse_bytes(input_bytes: &[u8], options: &RepairOptions) -> RepairResult 
     let input_size = input_bytes.len();
 
     if options.mode == "scale_pipeline" {
+        if options.scale_output == "tape" {
+            match parse_root_array_scale_tape(input_bytes, options) {
+                Ok((tape, plan)) => {
+                    let elapsed = t0.elapsed().as_millis();
+                    let mut ir_pairs = vec![
+                        ("split_mode".to_string(), JsonValue::String(plan.mode.to_string())),
+                        ("chunks".to_string(), JsonValue::NumberU64(plan.chunk_count as u64)),
+                        ("elements".to_string(), JsonValue::NumberU64(plan.elements as u64)),
+                    ];
+                    ir_pairs.push((
+                        "tape".to_string(),
+                        tape.to_json_value(if options.debug { Some(10_000) } else { None }),
+                    ));
+                    let candidate = Candidate {
+                        candidate_id: 0,
+                        value: None,
+                        normalized_json: None,
+                        ir: Some(JsonValue::Object(ir_pairs)),
+                        confidence: 1.0,
+                        cost: 0.0,
+                        repairs: Vec::new(),
+                        validations: CandidateValidations {
+                            strict_json_parse: true,
+                            schema_match: None,
+                        },
+                        diagnostics: CandidateDiagnostics {
+                            beam_width: Some(0),
+                            max_repairs: Some(0),
+                            ..CandidateDiagnostics::default()
+                        },
+                        dropped_spans: Vec::new(),
+                    };
+                    let mut metrics = Metrics::new("scale_pipeline");
+                    metrics.elapsed_ms = elapsed;
+                    metrics.split_mode = plan.mode.to_string();
+                    metrics.parallel_workers = options.parallel_workers.unwrap_or(0);
+                    metrics.elements = plan.elements;
+                    metrics.structural_density = plan.structural_density;
+
+                    return RepairResult {
+                        status: "strict_ok".to_string(),
+                        best_index: Some(0),
+                        input_stats: InputStats {
+                            input_bytes: input_size,
+                            extracted_span: (0, text.len()),
+                            prefix_skipped_bytes: 0,
+                            suffix_skipped_bytes: 0,
+                        },
+                        candidates: vec![candidate],
+                        partial: None,
+                        errors: Vec::new(),
+                        metrics,
+                        debug: None,
+                    };
+                }
+                Err(e) => {
+                    let elapsed = t0.elapsed().as_millis();
+                    return RepairResult {
+                        status: "failed".to_string(),
+                        best_index: None,
+                        input_stats: InputStats {
+                            input_bytes: input_size,
+                            extracted_span: (0, text.len()),
+                            prefix_skipped_bytes: 0,
+                            suffix_skipped_bytes: 0,
+                        },
+                        candidates: Vec::new(),
+                        partial: None,
+                        errors: vec![ParseError {
+                            kind: "ScalePipelineError".to_string(),
+                            at: None,
+                            message: Some(e),
+                        }],
+                        metrics: Metrics {
+                            elapsed_ms: elapsed,
+                            ..Metrics::new("scale_pipeline")
+                        },
+                        debug: None,
+                    };
+                }
+            }
+        }
         match parse_root_array_scale(input_bytes, options) {
             Ok((value, plan)) => {
                 let elapsed = t0.elapsed().as_millis();

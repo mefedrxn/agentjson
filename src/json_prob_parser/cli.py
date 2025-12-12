@@ -6,7 +6,8 @@ import sys
 from dataclasses import asdict
 from typing import Optional
 
-from .rust_core import parse
+from .anthropic_provider import AnthropicPatchSuggestProvider
+from .arbiter import parse
 from .types import RepairOptions
 
 
@@ -28,6 +29,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="json-prob-parser")
     p.add_argument("--input", "-i", default="-", help="Input file (default: stdin)")
     p.add_argument("--mode", default="auto", help="auto|strict_only|fast_repair|probabilistic|scale_pipeline")
+    p.add_argument("--scale-output", default="dom", choices=["dom", "tape"], help="scale_pipeline output: dom|tape")
     p.add_argument("--top-k", type=int, default=5)
     p.add_argument("--beam-width", type=int, default=32)
     p.add_argument("--max-repairs", type=int, default=20)
@@ -44,13 +46,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--allow-llm", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--llm-mode", default="patch_suggest", help="patch_suggest|token_suggest")
     p.add_argument("--llm-min-confidence", type=float, default=0.2)
-    p.add_argument("--llm-provider", default="none", choices=["none", "claude_agent_sdk"])
+    p.add_argument("--llm-provider", default="none", choices=["none", "anthropic", "claude_agent_sdk"])
     p.add_argument("--debug", action=argparse.BooleanOptionalAction, default=False)
     args = p.parse_args(argv)
 
     text = _read_input_bytes(args.input) if args.mode == "scale_pipeline" else _read_input(args.input)
     opt = RepairOptions(
         mode=args.mode,
+        scale_output=args.scale_output,
         top_k=args.top_k,
         beam_width=args.beam_width,
         max_repairs=args.max_repairs,
@@ -70,11 +73,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         debug=args.debug,
     )
 
-    if args.allow_llm and args.llm_provider == "claude_agent_sdk":
-        from .claude_agent_sdk_provider import ClaudeAgentSDKProvider
+    if args.allow_llm:
+        if args.llm_provider == "anthropic":
+            opt.llm_provider = AnthropicPatchSuggestProvider()
+        elif args.llm_provider == "claude_agent_sdk":
+            from .claude_agent_sdk_provider import ClaudeAgentSDKProvider
 
-        opt.llm_provider = ClaudeAgentSDKProvider.from_env()
+            opt.llm_provider = ClaudeAgentSDKProvider.from_env()
 
-    result = parse(text, opt)
+    try:
+        result = parse(text, opt)
+    except RuntimeError as e:
+        print(str(e).rstrip(), file=sys.stderr)
+        return 2
+
     print(json.dumps(asdict(result), ensure_ascii=False, indent=2))
     return 0 if result.status != "failed" else 2

@@ -4,6 +4,7 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use json_prob_parser::beam;
 use json_prob_parser::json::JsonValue;
 use json_prob_parser::scale;
+use json_prob_parser::{extract, heuristic, strict};
 use json_prob_parser::types::{Candidate, RepairAction, RepairOptions};
 
 fn json_to_py(py: Python<'_>, v: &JsonValue) -> PyObject {
@@ -117,6 +118,7 @@ fn options_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<RepairOptions> {
         }
     }
     set_opt!("parallel_backend", parallel_backend, String);
+    set_opt!("scale_output", scale_output, String);
 
     if let Some(v) = d.get_item("schema")? {
         if v.is_none() {
@@ -207,6 +209,17 @@ fn candidate_to_pydict<'py>(py: Python<'py>, c: &Candidate) -> PyResult<Bound<'p
     Ok(d)
 }
 
+fn repair_action_to_pydict<'py>(py: Python<'py>, r: &RepairAction) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new_bound(py);
+    d.set_item("op", r.op.clone())?;
+    d.set_item("span", r.span)?;
+    d.set_item("at", r.at)?;
+    d.set_item("token", r.token.clone())?;
+    d.set_item("cost_delta", r.cost_delta)?;
+    d.set_item("note", r.note.clone())?;
+    Ok(d)
+}
+
 #[pyfunction]
 fn parse_py(py: Python<'_>, input: &Bound<'_, PyAny>, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject> {
     let mut opt = options_from_dict(options)?;
@@ -222,6 +235,45 @@ fn parse_py(py: Python<'_>, input: &Bound<'_, PyAny>, options: Option<&Bound<'_,
     };
 
     Ok(json_to_py(py, &result.to_json_value()))
+}
+
+#[pyfunction]
+fn preprocess_py(py: Python<'_>, input: &Bound<'_, PyAny>, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject> {
+    let opt = options_from_dict(options)?;
+
+    let text = if let Ok(b) = input.downcast::<PyBytes>() {
+        String::from_utf8_lossy(b.as_bytes()).to_string()
+    } else if let Ok(s) = input.extract::<String>() {
+        s
+    } else {
+        return Err(pyo3::exceptions::PyTypeError::new_err("input must be str or bytes"));
+    };
+
+    let extraction = extract::extract_json_candidate(&text);
+    let extracted_text = extraction.extracted.clone();
+    let (repaired_text, heuristic_repairs) = heuristic::heuristic_repair(&extracted_text, &opt);
+
+    let mut base_repairs: Vec<RepairAction> = Vec::new();
+    base_repairs.extend_from_slice(&extraction.repairs);
+    base_repairs.extend_from_slice(&heuristic_repairs);
+
+    let error_pos = strict::strict_parse(&repaired_text).err().map(|e| e.pos);
+
+    let out = PyDict::new_bound(py);
+    out.set_item("extracted_span", (extraction.span.0, extraction.span.1))?;
+    out.set_item("extracted_text", extracted_text)?;
+    out.set_item("repaired_text", repaired_text)?;
+    out.set_item("truncated", extraction.truncated)?;
+    out.set_item("method", extraction.method)?;
+    out.set_item("error_pos", error_pos)?;
+
+    let repairs = PyList::empty_bound(py);
+    for r in &base_repairs {
+        repairs.append(repair_action_to_pydict(py, r)?)?;
+    }
+    out.set_item("base_repairs", repairs)?;
+
+    Ok(out.to_object(py))
 }
 
 #[pyfunction]
@@ -265,6 +317,7 @@ fn parse_root_array_scale_py(py: Python<'_>, data: &Bound<'_, PyBytes>, options:
 #[pymodule]
 fn json_prob_parser_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_py, m)?)?;
+    m.add_function(wrap_pyfunction!(preprocess_py, m)?)?;
     m.add_function(wrap_pyfunction!(probabilistic_repair_py, m)?)?;
     m.add_function(wrap_pyfunction!(parse_root_array_scale_py, m)?)?;
     Ok(())

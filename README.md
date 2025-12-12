@@ -110,11 +110,15 @@ json-prob-parser --input broken.json \
 |--------|---------|-------------|
 | `--input`, `-i` | stdin | Input file path |
 | `--mode` | `auto` | `auto`, `strict_only`, `fast_repair`, `probabilistic`, `scale_pipeline` |
+| `--scale-output` | `dom` | `dom` (materialize JSON) or `tape` (return IR only; value will be null) |
 | `--top-k` | 5 | Number of candidate repairs to return |
 | `--beam-width` | 32 | Beam search width |
 | `--max-repairs` | 20 | Maximum repair operations per candidate |
 | `--partial-ok` | true | Allow partial results on failure |
 | `--allow-llm` | false | Enable LLM fallback for extreme cases |
+| `--llm-provider` | `none` | `none`, `anthropic`, `claude_agent_sdk` |
+| `--llm-mode` | `patch_suggest` | `patch_suggest` or `token_suggest` (patch is recommended) |
+| `--llm-min-confidence` | 0.2 | Trigger LLM when best confidence is below this |
 | `--debug` | false | Include debug information |
 
 ## Repair Pipeline
@@ -153,10 +157,38 @@ Input Text
 
 ## LLM Deep Repair (Optional)
 
-For severely corrupted JSON where beam search fails, you can enable LLM-assisted repair:
+For severely corrupted JSON where beam search is low-confidence, you can enable LLM-assisted repair.
+
+### Option A) Anthropic SDK (simple)
+
+```bash
+python -m pip install anthropic
+export ANTHROPIC_API_KEY=...
+export CLAUDE_MODEL=claude-3-5-sonnet-latest
+```
 
 ```python
-from json_prob_parser import parse, RepairOptions
+from json_prob_parser import AnthropicPatchSuggestProvider, RepairOptions, parse
+
+result = parse(
+    '{"a":1,"b":2, completely broken garbage here',
+    RepairOptions(
+        mode="probabilistic",
+        allow_llm=True,
+        llm_mode="patch_suggest",
+        llm_min_confidence=0.2,
+        llm_provider=AnthropicPatchSuggestProvider(),
+    ),
+)
+
+print(result.metrics.llm_calls)
+print(result.metrics.llm_time_ms)
+```
+
+### Option B) Claude Agent SDK (tools: memory, web search, skills, etc.)
+
+```python
+from json_prob_parser import RepairOptions, parse
 from json_prob_parser.claude_agent_sdk_provider import ClaudeAgentSDKProvider
 
 # Set up your Claude Agent SDK agent
@@ -210,8 +242,8 @@ repair.note      # Human-readable description
 # Rust tests
 cd rust && cargo test
 
-# Python tests (after building PyO3)
-PYTHONPATH=src python -m pytest tests/ -v
+# Python tests (parse tests are skipped unless PyO3 is installed)
+PYTHONPATH=src python -m unittest discover -s tests -p 'test*.py' -v
 ```
 
 ### Build Rust CLI (standalone)
@@ -235,8 +267,11 @@ json-prob-parser/
 ├── rust-pyo3/               # PyO3 Python bindings
 │   └── src/lib.rs
 └── src/json_prob_parser/    # Python package
-    ├── rust_core.py         # Rust backend wrapper
-    ├── llm_arbiter.py       # LLM orchestration
+    ├── arbiter.py           # Python orchestrator (Rust + optional LLM)
+    ├── rust_core.py         # Thin PyO3 bridge
+    ├── anthropic_provider.py
+    ├── claude_agent_sdk_provider.py
+    ├── llm.py               # LLM payload + patch ops
     └── types.py             # Data classes
 ```
 

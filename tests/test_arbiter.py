@@ -4,11 +4,12 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-from json_prob_parser import RepairOptions, parse  # noqa: E402
-from json_prob_parser import apply_patch_ops_utf8  # noqa: E402
+from json_prob_parser import RepairOptions, apply_patch_ops_utf8, parse  # noqa: E402
+from json_prob_parser import rust_core  # noqa: E402
 
 
-class TestArbiter(unittest.TestCase):
+@unittest.skipUnless(rust_core.HAVE_RUST, "Rust PyO3 extension (json_prob_parser_rust) not installed")
+class TestArbiterParse(unittest.TestCase):
     def test_strict_ok(self):
         r = parse('{"a":1}')
         self.assertEqual(r.status, "strict_ok")
@@ -49,17 +50,6 @@ class TestArbiter(unittest.TestCase):
         r = parse("{“a”: “b”}")
         self.assertIn(r.status, ("repaired", "strict_ok"))
         self.assertEqual(r.best.value["a"], "b")
-
-    def test_apply_llm_patch_ops_utf8(self):
-        text = 'X{"a":1}Y'
-        patched = apply_patch_ops_utf8(
-            text,
-            [
-                {"op": "delete", "span": [0, 1]},
-                {"op": "delete", "span": [len(text) - 1, len(text)]},
-            ],
-        )
-        self.assertEqual(patched, '{"a":1}')
 
     def test_scale_pipeline_root_array_thread(self):
         data = b"[1, 2, 3]"
@@ -113,6 +103,19 @@ class TestArbiter(unittest.TestCase):
         self.assertIn(r.status, ("repaired", "partial"))
         self.assertEqual(r.best.value["a"], 1)
         self.assertEqual(r.best.value["b"], 2)
+
+
+class TestLLMUtils(unittest.TestCase):
+    def test_apply_llm_patch_ops_utf8(self):
+        text = 'X{"a":1}Y'
+        patched = apply_patch_ops_utf8(
+            text,
+            [
+                {"op": "delete", "span": [0, 1]},
+                {"op": "delete", "span": [len(text) - 1, len(text)]},
+            ],
+        )
+        self.assertEqual(patched, '{"a":1}')
 
 
 if __name__ == "__main__":

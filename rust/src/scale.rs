@@ -1,12 +1,15 @@
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use crate::json::{parse_strict_json, JsonValue};
+use crate::tape::{append_segment, parse_object_pair_segment, parse_strict_tape, Tape, TapeEntry, TapeTokenType};
 use crate::types::RepairOptions;
 
 pub type SplitMode = &'static str;
 
 pub const SPLIT_NO_SPLIT: SplitMode = "NO_SPLIT";
 pub const SPLIT_ROOT_ARRAY_ELEMENTS: SplitMode = "ROOT_ARRAY_ELEMENTS";
+pub const SPLIT_ROOT_OBJECT_PAIRS: SplitMode = "ROOT_OBJECT_PAIRS";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SplitPlan {
@@ -34,6 +37,18 @@ fn trim_ws(data: &[u8]) -> (usize, usize) {
         end -= 1;
     }
     (start, end)
+}
+
+fn trim_span(data: &[u8], start: usize, end: usize) -> (usize, usize) {
+    let mut s = start;
+    let mut e = end;
+    while s < e && is_ws(data[s]) {
+        s += 1;
+    }
+    while e > s && is_ws(data[e - 1]) {
+        e -= 1;
+    }
+    (s, e)
 }
 
 fn iter_root_array_element_spans(data: &[u8], start: usize, end: usize) -> Vec<(usize, usize)> {
@@ -116,6 +131,69 @@ fn iter_root_array_element_spans(data: &[u8], start: usize, end: usize) -> Vec<(
     spans
 }
 
+fn iter_root_object_pair_spans(data: &[u8], start: usize, end: usize) -> Vec<(usize, usize)> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    if start >= end || data.get(start) != Some(&b'{') || data.get(end - 1) != Some(&b'}') {
+        return spans;
+    }
+
+    let mut i = start + 1;
+    while i < end && is_ws(data[i]) {
+        i += 1;
+    }
+    if i >= end.saturating_sub(1) {
+        return spans; // empty object
+    }
+
+    let mut pair_start = i;
+    let mut in_string = false;
+    let mut escape = false;
+    let mut depth_brace: i64 = 1; // root '{' already entered
+    let mut depth_bracket: i64 = 0;
+
+    for i in (start + 1)..(end - 1) {
+        let ch = data[i];
+        if in_string {
+            if escape {
+                escape = false;
+            } else if ch == b'\\' {
+                escape = true;
+            } else if ch == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if ch == b'"' {
+            in_string = true;
+            continue;
+        }
+
+        match ch {
+            b'{' => depth_brace += 1,
+            b'}' => depth_brace -= 1,
+            b'[' => depth_bracket += 1,
+            b']' => depth_bracket -= 1,
+            _ => {}
+        }
+
+        if ch == b',' && depth_brace == 1 && depth_bracket == 0 {
+            let (s, e) = trim_span(data, pair_start, i);
+            if e > s {
+                spans.push((s, e));
+            }
+            pair_start = i + 1;
+        }
+    }
+
+    let (s, e) = trim_span(data, pair_start, end - 1);
+    if e > s {
+        spans.push((s, e));
+    }
+
+    spans
+}
+
 fn parse_task_bytes(data: &[u8], spans: &[(usize, usize)]) -> Result<Vec<JsonValue>, String> {
     let mut payload: Vec<u8> = Vec::new();
     payload.push(b'[');
@@ -131,6 +209,25 @@ fn parse_task_bytes(data: &[u8], spans: &[(usize, usize)]) -> Result<Vec<JsonVal
     match v {
         JsonValue::Array(a) => Ok(a),
         _ => Err("task payload did not parse to array".to_string()),
+    }
+}
+
+fn parse_object_pair_task_bytes(data: &[u8], spans: &[(usize, usize)]) -> Result<Vec<(String, JsonValue)>, String> {
+    let mut payload: Vec<u8> = Vec::new();
+    payload.push(b'{');
+    for (idx, (s, e)) in spans.iter().enumerate() {
+        if idx > 0 {
+            payload.push(b',');
+        }
+        payload.extend_from_slice(&data[*s..*e]);
+    }
+    payload.push(b'}');
+    let s = std::str::from_utf8(&payload).map_err(|e| format!("invalid utf-8 in task payload: {e}"))?;
+    let v =
+        parse_strict_json(s).map_err(|e| format!("strict parse failed in task payload: {} at {}", e.message, e.pos))?;
+    match v {
+        JsonValue::Object(obj) => Ok(obj),
+        _ => Err("task payload did not parse to object".to_string()),
     }
 }
 
@@ -231,77 +328,456 @@ fn root_array_split_plan(
 
 pub fn parse_root_array_scale(data: &[u8], opt: &RepairOptions) -> Result<(JsonValue, SplitPlan), String> {
     let (s0, e0) = trim_ws(data);
-    if e0.saturating_sub(s0) <= 2 || data.get(s0) != Some(&b'[') || data.get(e0 - 1) != Some(&b']') {
-        let s = std::str::from_utf8(&data[s0..e0]).map_err(|e| format!("invalid utf-8: {e}"))?;
-        let value =
-            parse_strict_json(s).map_err(|e| format!("strict parse failed: {} at {}", e.message, e.pos))?;
+    if data.get(s0) == Some(&b'[') && data.get(e0.saturating_sub(1)) == Some(&b']') {
+        let (plan, tasks) = root_array_split_plan(data, s0, e0, opt);
+        if plan.mode == SPLIT_NO_SPLIT {
+            let elems = parse_task_bytes(data, &tasks[0])?;
+            return Ok((JsonValue::Array(elems), plan));
+        }
+
+        let workers = opt.parallel_workers.unwrap_or_else(|| {
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2)
+        });
+        let workers = std::cmp::max(1usize, workers);
+
+        let results: Mutex<Vec<Option<Vec<JsonValue>>>> = Mutex::new(vec![None; tasks.len()]);
+        let next_idx = AtomicUsize::new(0usize);
+
+        let mut first_err: Option<String> = None;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..workers.min(tasks.len()) {
+                handles.push(scope.spawn(|| -> Result<(), String> {
+                    loop {
+                        let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                        if idx >= tasks.len() {
+                            break;
+                        }
+                        let chunk = parse_task_bytes(data, &tasks[idx])?;
+                        let mut r = results.lock().map_err(|_| "mutex poisoned".to_string())?;
+                        r[idx] = Some(chunk);
+                    }
+                    Ok(())
+                }));
+            }
+
+            for h in handles {
+                match h.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                    Err(_) => {
+                        if first_err.is_none() {
+                            first_err = Some("worker panicked".to_string());
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+
+        let mut out: Vec<JsonValue> = Vec::new();
+        let r = results.lock().map_err(|_| "mutex poisoned".to_string())?;
+        for vs in r.iter().flatten() {
+            out.extend_from_slice(vs);
+        }
+        return Ok((JsonValue::Array(out), plan));
+    }
+
+    if data.get(s0) == Some(&b'{') && data.get(e0.saturating_sub(1)) == Some(&b'}') {
+        let spans = iter_root_object_pair_spans(data, s0, e0);
+        let elements = spans.len();
+
+        let mut structural: usize = 0;
+        let mut in_string = false;
+        let mut escape = false;
+        for &ch in &data[s0..e0] {
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if ch == b'\\' {
+                    escape = true;
+                } else if ch == b'"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            if ch == b'"' {
+                in_string = true;
+                continue;
+            }
+            if matches!(ch, b'{' | b'}' | b'[' | b']' | b',' | b':') {
+                structural += 1;
+            }
+        }
+        let structural_density = (structural as f64) / ((e0 - s0).max(1) as f64);
+
+        let do_parallel = match allow_parallel_bool(opt) {
+            None => {
+                (e0 - s0) >= opt.parallel_threshold_bytes
+                    && elements >= opt.min_elements_for_parallel
+                    && structural_density >= opt.density_threshold
+            }
+            Some(v) => v,
+        };
+
+        if !do_parallel || elements <= 1 {
+            let s = std::str::from_utf8(&data[s0..e0]).map_err(|e| format!("invalid utf-8: {e}"))?;
+            let value =
+                parse_strict_json(s).map_err(|e| format!("strict parse failed: {} at {}", e.message, e.pos))?;
+            return Ok((
+                value,
+                SplitPlan {
+                    mode: SPLIT_NO_SPLIT,
+                    elements,
+                    structural_density,
+                    chunk_count: 1,
+                },
+            ));
+        }
+
+        let target = std::cmp::max(1_000_000usize, opt.parallel_chunk_bytes);
+        let mut tasks: Vec<Vec<(usize, usize)>> = Vec::new();
+        let mut cur: Vec<(usize, usize)> = Vec::new();
+        let mut cur_bytes: usize = 0;
+        for (s, e) in spans {
+            cur.push((s, e));
+            cur_bytes += e - s;
+            if !cur.is_empty() && cur_bytes >= target {
+                tasks.push(cur);
+                cur = Vec::new();
+                cur_bytes = 0;
+            }
+        }
+        if !cur.is_empty() {
+            tasks.push(cur);
+        }
+
+        let plan = SplitPlan {
+            mode: SPLIT_ROOT_OBJECT_PAIRS,
+            elements,
+            structural_density,
+            chunk_count: tasks.len(),
+        };
+
+        let workers = opt.parallel_workers.unwrap_or_else(|| {
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2)
+        });
+        let workers = std::cmp::max(1usize, workers);
+
+        let results: Mutex<Vec<Option<Vec<(String, JsonValue)>>>> = Mutex::new(vec![None; tasks.len()]);
+        let next_idx = AtomicUsize::new(0usize);
+
+        let mut first_err: Option<String> = None;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..workers.min(tasks.len()) {
+                handles.push(scope.spawn(|| -> Result<(), String> {
+                    loop {
+                        let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                        if idx >= tasks.len() {
+                            break;
+                        }
+                        let chunk = parse_object_pair_task_bytes(data, &tasks[idx])?;
+                        let mut r = results.lock().map_err(|_| "mutex poisoned".to_string())?;
+                        r[idx] = Some(chunk);
+                    }
+                    Ok(())
+                }));
+            }
+
+            for h in handles {
+                match h.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                    Err(_) => {
+                        if first_err.is_none() {
+                            first_err = Some("worker panicked".to_string());
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+
+        let mut out: Vec<(String, JsonValue)> = Vec::new();
+        let r = results.lock().map_err(|_| "mutex poisoned".to_string())?;
+        for chunk in r.iter().flatten() {
+            out.extend_from_slice(chunk);
+        }
+        return Ok((JsonValue::Object(out), plan));
+    }
+
+    let s = std::str::from_utf8(&data[s0..e0]).map_err(|e| format!("invalid utf-8: {e}"))?;
+    let value = parse_strict_json(s).map_err(|e| format!("strict parse failed: {} at {}", e.message, e.pos))?;
+    Ok((
+        value,
+        SplitPlan {
+            mode: SPLIT_NO_SPLIT,
+            elements: 0,
+            structural_density: 0.0,
+            chunk_count: 1,
+        },
+    ))
+}
+
+pub fn parse_root_array_scale_tape(data: &[u8], opt: &RepairOptions) -> Result<(Tape, SplitPlan), String> {
+    let (s0, e0) = trim_ws(data);
+
+    if data.get(s0) == Some(&b'[') && data.get(e0.saturating_sub(1)) == Some(&b']') {
+        let (plan, tasks) = root_array_split_plan(data, s0, e0, opt);
+        if plan.mode == SPLIT_NO_SPLIT {
+            let tape = parse_strict_tape(&data[s0..e0], s0)
+                .map_err(|e| format!("tape parse failed: {} at {}", e.message, e.pos))?;
+            return Ok((tape, plan));
+        }
+
+        let workers = opt.parallel_workers.unwrap_or_else(|| {
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2)
+        });
+        let workers = std::cmp::max(1usize, workers);
+
+        let results: Mutex<Vec<Option<Vec<Vec<TapeEntry>>>>> = Mutex::new(vec![None; tasks.len()]);
+        let next_idx = AtomicUsize::new(0usize);
+
+        let mut first_err: Option<String> = None;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..workers.min(tasks.len()) {
+                handles.push(scope.spawn(|| -> Result<(), String> {
+                    loop {
+                        let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                        if idx >= tasks.len() {
+                            break;
+                        }
+                        let mut segs: Vec<Vec<TapeEntry>> = Vec::with_capacity(tasks[idx].len());
+                        for (s, e) in &tasks[idx] {
+                            let seg_tape = parse_strict_tape(&data[*s..*e], *s)
+                                .map_err(|e| format!("tape parse failed: {} at {}", e.message, e.pos))?;
+                            segs.push(seg_tape.entries);
+                        }
+                        let mut r = results.lock().map_err(|_| "mutex poisoned".to_string())?;
+                        r[idx] = Some(segs);
+                    }
+                    Ok(())
+                }));
+            }
+
+            for h in handles {
+                match h.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                    Err(_) => {
+                        if first_err.is_none() {
+                            first_err = Some("worker panicked".to_string());
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+
+        let mut entries: Vec<TapeEntry> = Vec::new();
+        let start_idx = entries.len();
+        entries.push(TapeEntry::new(TapeTokenType::ArrayStart, s0, 1));
+
+        let r = results.lock().map_err(|_| "mutex poisoned".to_string())?;
+        for segs in r.iter().flatten() {
+            for seg in segs {
+                append_segment(&mut entries, seg);
+            }
+        }
+
+        let end_idx = entries.len();
+        entries.push(TapeEntry::new(TapeTokenType::ArrayEnd, e0 - 1, 1));
+        entries[start_idx].payload = end_idx as u64;
+
         return Ok((
-            value,
-            SplitPlan {
-                mode: SPLIT_NO_SPLIT,
-                elements: 0,
-                structural_density: 0.0,
-                chunk_count: 1,
+            Tape {
+                root_index: start_idx,
+                data_span: (s0, e0),
+                entries,
             },
+            plan,
         ));
     }
 
-    let (plan, tasks) = root_array_split_plan(data, s0, e0, opt);
-    if plan.mode == SPLIT_NO_SPLIT {
-        let elems = parse_task_bytes(data, &tasks[0])?;
-        return Ok((JsonValue::Array(elems), plan));
-    }
+    if data.get(s0) == Some(&b'{') && data.get(e0.saturating_sub(1)) == Some(&b'}') {
+        let spans = iter_root_object_pair_spans(data, s0, e0);
+        let elements = spans.len();
 
-    let workers = opt.parallel_workers.unwrap_or_else(|| {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2)
-    });
-    let workers = std::cmp::max(1usize, workers);
-
-    // NOTE: Python supports a process+shared-memory backend; in Rust std-only we treat
-    // both "process" and "thread" as a thread backend.
-    let tasks = Arc::new(tasks);
-    let data = Arc::new(data.to_vec());
-    let results: Arc<Mutex<Vec<Option<Vec<JsonValue>>>>> = Arc::new(Mutex::new(vec![None; tasks.len()]));
-    let next_idx: Arc<Mutex<usize>> = Arc::new(Mutex::new(0usize));
-
-    let mut handles = Vec::new();
-    for _ in 0..workers.min(tasks.len()) {
-        let tasks = Arc::clone(&tasks);
-        let data = Arc::clone(&data);
-        let results = Arc::clone(&results);
-        let next_idx = Arc::clone(&next_idx);
-        handles.push(std::thread::spawn(move || -> Result<(), String> {
-            loop {
-                let idx = {
-                    let mut g = next_idx.lock().map_err(|_| "mutex poisoned".to_string())?;
-                    let idx = *g;
-                    *g += 1;
-                    idx
-                };
-                if idx >= tasks.len() {
-                    break;
+        let mut structural: usize = 0;
+        let mut in_string = false;
+        let mut escape = false;
+        for &ch in &data[s0..e0] {
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if ch == b'\\' {
+                    escape = true;
+                } else if ch == b'"' {
+                    in_string = false;
                 }
-                let chunk = parse_task_bytes(&data, &tasks[idx])?;
-                let mut r = results.lock().map_err(|_| "mutex poisoned".to_string())?;
-                r[idx] = Some(chunk);
+                continue;
             }
-            Ok(())
-        }));
-    }
-
-    for h in handles {
-        match h.join() {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e),
-            Err(_) => return Err("worker panicked".to_string()),
+            if ch == b'"' {
+                in_string = true;
+                continue;
+            }
+            if matches!(ch, b'{' | b'}' | b'[' | b']' | b',' | b':') {
+                structural += 1;
+            }
         }
+        let structural_density = (structural as f64) / ((e0 - s0).max(1) as f64);
+
+        let do_parallel = match allow_parallel_bool(opt) {
+            None => {
+                (e0 - s0) >= opt.parallel_threshold_bytes
+                    && elements >= opt.min_elements_for_parallel
+                    && structural_density >= opt.density_threshold
+            }
+            Some(v) => v,
+        };
+
+        if !do_parallel || elements <= 1 {
+            let tape = parse_strict_tape(&data[s0..e0], s0)
+                .map_err(|e| format!("tape parse failed: {} at {}", e.message, e.pos))?;
+            return Ok((
+                tape,
+                SplitPlan {
+                    mode: SPLIT_NO_SPLIT,
+                    elements,
+                    structural_density,
+                    chunk_count: 1,
+                },
+            ));
+        }
+
+        let target = std::cmp::max(1_000_000usize, opt.parallel_chunk_bytes);
+        let mut tasks: Vec<Vec<(usize, usize)>> = Vec::new();
+        let mut cur: Vec<(usize, usize)> = Vec::new();
+        let mut cur_bytes: usize = 0;
+        for (s, e) in spans {
+            cur.push((s, e));
+            cur_bytes += e - s;
+            if !cur.is_empty() && cur_bytes >= target {
+                tasks.push(cur);
+                cur = Vec::new();
+                cur_bytes = 0;
+            }
+        }
+        if !cur.is_empty() {
+            tasks.push(cur);
+        }
+
+        let plan = SplitPlan {
+            mode: SPLIT_ROOT_OBJECT_PAIRS,
+            elements,
+            structural_density,
+            chunk_count: tasks.len(),
+        };
+
+        let workers = opt.parallel_workers.unwrap_or_else(|| {
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2)
+        });
+        let workers = std::cmp::max(1usize, workers);
+
+        let results: Mutex<Vec<Option<Vec<Vec<TapeEntry>>>>> = Mutex::new(vec![None; tasks.len()]);
+        let next_idx = AtomicUsize::new(0usize);
+
+        let mut first_err: Option<String> = None;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..workers.min(tasks.len()) {
+                handles.push(scope.spawn(|| -> Result<(), String> {
+                    loop {
+                        let idx = next_idx.fetch_add(1, Ordering::Relaxed);
+                        if idx >= tasks.len() {
+                            break;
+                        }
+                        let mut segs: Vec<Vec<TapeEntry>> = Vec::with_capacity(tasks[idx].len());
+                        for (s, e) in &tasks[idx] {
+                            let seg = parse_object_pair_segment(&data[*s..*e], *s)
+                                .map_err(|e| format!("tape parse failed: {} at {}", e.message, e.pos))?;
+                            segs.push(seg);
+                        }
+                        let mut r = results.lock().map_err(|_| "mutex poisoned".to_string())?;
+                        r[idx] = Some(segs);
+                    }
+                    Ok(())
+                }));
+            }
+
+            for h in handles {
+                match h.join() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        if first_err.is_none() {
+                            first_err = Some(e);
+                        }
+                    }
+                    Err(_) => {
+                        if first_err.is_none() {
+                            first_err = Some("worker panicked".to_string());
+                        }
+                    }
+                }
+            }
+        });
+        if let Some(e) = first_err {
+            return Err(e);
+        }
+
+        let mut entries: Vec<TapeEntry> = Vec::new();
+        let start_idx = entries.len();
+        entries.push(TapeEntry::new(TapeTokenType::ObjectStart, s0, 1));
+
+        let r = results.lock().map_err(|_| "mutex poisoned".to_string())?;
+        for segs in r.iter().flatten() {
+            for seg in segs {
+                append_segment(&mut entries, seg);
+            }
+        }
+
+        let end_idx = entries.len();
+        entries.push(TapeEntry::new(TapeTokenType::ObjectEnd, e0 - 1, 1));
+        entries[start_idx].payload = end_idx as u64;
+
+        return Ok((
+            Tape {
+                root_index: start_idx,
+                data_span: (s0, e0),
+                entries,
+            },
+            plan,
+        ));
     }
 
-    let mut out: Vec<JsonValue> = Vec::new();
-    let r = results.lock().map_err(|_| "mutex poisoned".to_string())?;
-    for vs in r.iter().flatten() {
-        out.extend_from_slice(vs);
-    }
-    Ok((JsonValue::Array(out), plan))
+    let tape = parse_strict_tape(&data[s0..e0], s0).map_err(|e| format!("tape parse failed: {} at {}", e.message, e.pos))?;
+    Ok((
+        tape,
+        SplitPlan {
+            mode: SPLIT_NO_SPLIT,
+            elements: 0,
+            structural_density: 0.0,
+            chunk_count: 1,
+        },
+    ))
 }
-

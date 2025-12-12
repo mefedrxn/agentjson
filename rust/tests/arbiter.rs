@@ -138,6 +138,52 @@ fn scale_pipeline_root_array_thread() {
 }
 
 #[test]
+fn scale_pipeline_root_object_pairs_thread() {
+    let data = br#"{"a":1,"b":2,"c":3}"#;
+    let mut opt = RepairOptions::default();
+    opt.mode = "scale_pipeline".to_string();
+    opt.allow_parallel = "true".to_string();
+    opt.parallel_backend = "thread".to_string();
+    opt.min_elements_for_parallel = 1;
+    opt.parallel_threshold_bytes = 0;
+    opt.parallel_workers = Some(2);
+    opt.parallel_chunk_bytes = 1;
+
+    let r = json_prob_parser::parse_bytes(data, &opt);
+    assert_eq!(r.status, "strict_ok");
+    let best = r.best().unwrap();
+    assert_eq!(
+        best.value.as_ref().unwrap(),
+        &JsonValue::Object(vec![
+            ("a".to_string(), JsonValue::NumberI64(1)),
+            ("b".to_string(), JsonValue::NumberI64(2)),
+            ("c".to_string(), JsonValue::NumberI64(3)),
+        ])
+    );
+    let ir = best.ir.as_ref().unwrap();
+    assert_eq!(
+        get_obj_field(ir, "split_mode"),
+        Some(&JsonValue::String("ROOT_OBJECT_PAIRS".to_string()))
+    );
+}
+
+#[test]
+fn scale_pipeline_tape_output_root_array() {
+    let data = b"[1, 2, 3]";
+    let mut opt = RepairOptions::default();
+    opt.mode = "scale_pipeline".to_string();
+    opt.scale_output = "tape".to_string();
+    opt.allow_parallel = "false".to_string();
+
+    let r = json_prob_parser::parse_bytes(data, &opt);
+    assert_eq!(r.status, "strict_ok");
+    let best = r.best().unwrap();
+    assert!(best.value.is_none());
+    let ir = best.ir.as_ref().unwrap();
+    assert!(get_obj_field(ir, "tape").is_some());
+}
+
+#[test]
 fn llm_deep_repair_patch_suggest() {
     let data = br#"{"a":1,"b":2, nonsense nonsense"#;
     let mut opt = RepairOptions::default();

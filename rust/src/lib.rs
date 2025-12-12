@@ -9,6 +9,7 @@ pub mod llm_arbiter;
 pub mod scale;
 pub mod schema;
 pub mod strict;
+pub mod tape;
 pub mod types;
 
 pub use arbiter::{arbiter_parse, parse, parse_bytes};

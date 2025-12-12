@@ -75,13 +75,23 @@ class AnthropicPatchSuggestProvider:
         if not self.model:
             raise RuntimeError("Missing model (set CLAUDE_MODEL/ANTHROPIC_MODEL or pass model=...)")
 
-        prompt = (
-            "Return JSON in this format only:\n"
-            "{\"mode\":\"patch_suggest\",\"patches\":[{\"patch_id\":\"p1\",\"ops\":[...],\"confidence\":0.5}]}\n"
-            "\n"
-            "PAYLOAD:\n"
-            + json.dumps(payload, ensure_ascii=False)
-        )
+        mode = str(payload.get("mode") or "patch_suggest")
+        if mode == "token_suggest":
+            prompt = (
+                "Return JSON in this format only:\n"
+                "{\"mode\":\"token_suggest\",\"suggestions\":[{\"type\":\"insert_tokens\",\"tokens\":[\":\"],\"confidence\":0.5}]}\n"
+                "\n"
+                "PAYLOAD:\n"
+                + json.dumps(payload, ensure_ascii=False)
+            )
+        else:
+            prompt = (
+                "Return JSON in this format only:\n"
+                "{\"mode\":\"patch_suggest\",\"patches\":[{\"patch_id\":\"p1\",\"ops\":[...],\"confidence\":0.5}]}\n"
+                "\n"
+                "PAYLOAD:\n"
+                + json.dumps(payload, ensure_ascii=False)
+            )
 
         client = Anthropic(api_key=self.api_key)
         resp = client.messages.create(
@@ -98,4 +108,3 @@ class AnthropicPatchSuggestProvider:
             return json.loads(text)
         except json.JSONDecodeError:
             return text
-

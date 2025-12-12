@@ -4,13 +4,20 @@ from typing import Any, Mapping, Optional, Sequence, Tuple
 
 
 def make_snippet(text: str, *, center: Optional[int], window: int = 1200) -> tuple[str, Tuple[int, int]]:
+    """
+    Return a snippet around `center` using **UTF-8 byte offsets** (spec requirement).
+
+    The returned span is (start,end) in UTF-8 bytes relative to `text.encode("utf-8")`.
+    """
+    b = text.encode("utf-8", errors="strict")
     if center is None:
-        center = min(len(text), max(0, len(text) // 2))
-    center = max(0, min(len(text), center))
-    half = max(1, window // 2)
+        center = len(b) // 2
+    center = max(0, min(len(b), int(center)))
+    half = max(1, int(window) // 2)
     start = max(0, center - half)
-    end = min(len(text), center + half)
-    return text[start:end], (start, end)
+    end = min(len(b), center + half)
+    snippet = b[start:end].decode("utf-8", errors="replace")
+    return snippet, (start, end)
 
 
 def build_llm_payload(
@@ -88,4 +95,3 @@ def apply_patch_ops_utf8(extracted_text: str, ops: Sequence[Mapping[str, Any]]) 
         else:
             raise AssertionError("unreachable")
     return b.decode("utf-8", errors="replace")
-

@@ -123,6 +123,7 @@ pub struct RepairOptions {
     pub parallel_chunk_bytes: usize,
     pub parallel_workers: Option<usize>,
     pub parallel_backend: String, // process|thread
+    pub scale_output: String, // dom|tape
     pub partial_ok: bool,
     pub allow_single_quotes: bool,
     pub allow_unquoted_keys: bool,
@@ -158,6 +159,7 @@ impl Default for RepairOptions {
             parallel_chunk_bytes: 8 * 1024 * 1024,
             parallel_workers: None,
             parallel_backend: "process".to_string(),
+            scale_output: "dom".to_string(),
             partial_ok: true,
             allow_single_quotes: true,
             allow_unquoted_keys: true,
