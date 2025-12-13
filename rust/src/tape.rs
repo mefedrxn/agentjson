@@ -119,7 +119,7 @@ fn err(message: &str, base_offset: usize, pos: usize) -> TapeError {
 }
 
 fn is_hex(b: u8) -> bool {
-    matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+    b.is_ascii_hexdigit()
 }
 
 fn parse_literal(bytes: &[u8], base_offset: usize, i: &mut usize, lit: &[u8]) -> Result<(), TapeError> {
@@ -404,4 +404,3 @@ pub fn append_segment(dst: &mut Vec<TapeEntry>, seg: &[TapeEntry]) {
         dst.push(ee);
     }
 }
-

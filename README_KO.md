@@ -1,4 +1,4 @@
-# json-prob-parser
+# agentjson
 
 Rust 기반의 확률적 JSON 복구 라이브러리 (Python 바인딩 포함). 표준 파서가 거부하는 심각하게 깨진 JSON을 처리합니다.
 
@@ -36,7 +36,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ```bash
 # 저장소 클론
-git clone https://github.com/anthropics/json-prob-parser.git
+git clone https://github.com/sionic-ai/json-prob-parser.git
 cd json-prob-parser
 
 # 가상 환경 생성
@@ -45,7 +45,7 @@ source .venv/bin/activate  # Windows: `.venv\Scripts\activate`
 
 # maturin 설치 및 빌드
 pip install maturin
-maturin develop -m rust-pyo3/Cargo.toml
+maturin develop
 
 # Python 패키지 설치
 pip install -e .
@@ -56,7 +56,7 @@ pip install -e .
 ### Python 라이브러리
 
 ```python
-from json_prob_parser import parse, RepairOptions
+from agentjson import parse, RepairOptions
 
 # 간단한 사용법
 result = parse('{"a": 1, "b": 2,}')  # 후행 콤마
@@ -91,13 +91,13 @@ print(result.metrics.elapsed_ms)        # 처리 시간
 
 ```bash
 # stdin에서 입력
-echo '{"a": 1, "b": 2,}' | json-prob-parser
+echo '{"a": 1, "b": 2,}' | agentjson
 
 # 파일에서 입력
-json-prob-parser --input broken.json
+agentjson --input broken.json
 
 # 옵션과 함께 사용
-json-prob-parser --input broken.json \
+agentjson --input broken.json \
     --mode probabilistic \
     --beam-width 64 \
     --max-repairs 100 \
@@ -285,6 +285,12 @@ result = parse(
 print(result.best.ir['tape']['entry_count'])
 ```
 
+`tape`는 대용량 처리를 위한 내부 **IR(중간 표현)** 입니다:
+
+- JSON을 “토큰 스트림(평면 배열)” 형태의 `TapeEntry`들로 저장합니다(토큰 타입 + 원본 입력의 byte `offset`/`length`).
+- 컨테이너(`array_start`/`object_start`)는 payload로 “매칭되는 end 엔트리”로 점프할 수 있는 인덱스를 가집니다.
+- DOM을 만들지 않아도 구조를 추적/병렬 merge할 수 있어서 `scale_pipeline`에서 유리합니다.
+
 ## 개발
 
 ### 테스트 실행
@@ -302,25 +308,25 @@ PYTHONPATH=src python -m unittest discover -s tests -p 'test*.py' -v
 ```bash
 cd rust
 cargo build --release
-./target/release/json-prob-parser --input ../demo/broken.json
+./target/release/agentjson --input ../demo/broken.json
 ```
 
 ## 아키텍처
 
 ```
-json-prob-parser/
+agentjson/
 ├── rust/                    # 핵심 Rust 라이브러리
 │   └── src/
 │       ├── heuristic.rs     # 휴리스틱 복구
 │       ├── beam.rs          # Beam Search 알고리즘
-│       ├── arbiter.rs       # 메인 오케스트레이션
+│       ├── pipeline.rs      # 파싱 파이프라인 오케스트레이션
 │       ├── tape.rs          # Tape/IR zero-copy 구조
 │       ├── scale.rs         # 대용량 병렬 처리
 │       └── ...
 ├── rust-pyo3/               # PyO3 Python 바인딩
 │   └── src/lib.rs
 └── src/json_prob_parser/    # Python 패키지
-    ├── arbiter.py           # Python 오케스트레이터 (Rust + 선택적 LLM)
+    ├── pipeline.py          # Python 파이프라인 (Rust + 선택적 LLM)
     ├── rust_core.py         # 얇은 PyO3 브릿지
     ├── anthropic_provider.py
     ├── claude_agent_sdk_provider.py

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Demo script for json-prob-parser."""
+"""Demo script for agentjson."""
 
 import json
 import sys
@@ -8,7 +8,7 @@ from pathlib import Path
 # Add src to path for running without install
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from json_prob_parser import parse, RepairOptions
+from agentjson import parse, RepairOptions
 
 
 def main():

@@ -1,5 +1,7 @@
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::buffer::PyBuffer;
+use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList};
+use pyo3::IntoPyObjectExt;
 
 use json_prob_parser::beam;
 use json_prob_parser::json::JsonValue;
@@ -10,26 +12,83 @@ use json_prob_parser::types::{Candidate, RepairAction, RepairOptions};
 fn json_to_py(py: Python<'_>, v: &JsonValue) -> PyObject {
     match v {
         JsonValue::Null => py.None(),
-        JsonValue::Bool(b) => b.to_object(py),
-        JsonValue::NumberI64(n) => n.to_object(py),
-        JsonValue::NumberU64(n) => n.to_object(py),
-        JsonValue::NumberF64(n) => n.to_object(py),
-        JsonValue::String(s) => s.to_object(py),
+        JsonValue::Bool(b) => (*b).into_py_any(py).unwrap(),
+        JsonValue::NumberI64(n) => (*n).into_py_any(py).unwrap(),
+        JsonValue::NumberU64(n) => (*n).into_py_any(py).unwrap(),
+        JsonValue::NumberF64(n) => (*n).into_py_any(py).unwrap(),
+        JsonValue::String(s) => s.as_str().into_py_any(py).unwrap(),
         JsonValue::Array(a) => {
-            let list = PyList::empty_bound(py);
+            let list = PyList::empty(py);
             for item in a {
                 list.append(json_to_py(py, item)).unwrap();
             }
-            list.to_object(py)
+            list.into_any().unbind()
         }
         JsonValue::Object(obj) => {
-            let d = PyDict::new_bound(py);
+            let d = PyDict::new(py);
             for (k, vv) in obj {
                 d.set_item(k, json_to_py(py, vv)).unwrap();
             }
-            d.to_object(py)
+            d.into_any().unbind()
         }
     }
+}
+
+#[pyfunction]
+fn strict_loads_py(py: Python<'_>, input: &Bound<'_, PyAny>) -> PyResult<PyObject> {
+    let parsed = if let Ok(s) = input.extract::<&str>() {
+        strict::strict_parse(s)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err((e.message, e.pos)))?
+    } else if let Ok(b) = input.downcast::<PyBytes>() {
+        let s = std::str::from_utf8(b.as_bytes()).map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err((
+                "str is not valid UTF-8: surrogates not allowed".to_string(),
+                0_usize,
+            ))
+        })?;
+        strict::strict_parse(s)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err((e.message, e.pos)))?
+    } else if let Ok(ba) = input.downcast::<PyByteArray>() {
+        let parsed = {
+            // SAFETY: We do not call back into Python while using this slice.
+            let bytes = unsafe { ba.as_bytes() };
+            let s = std::str::from_utf8(bytes).map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err((
+                    "str is not valid UTF-8: surrogates not allowed".to_string(),
+                    0_usize,
+                ))
+            })?;
+            strict::strict_parse(s)
+        };
+        parsed.map_err(|e| pyo3::exceptions::PyValueError::new_err((e.message, e.pos)))?
+    } else if let Ok(buf) = PyBuffer::<u8>::get(input) {
+        let parsed = {
+            let cells = buf.as_slice(py).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err((
+                    "input buffer must be C-contiguous".to_string(),
+                    0_usize,
+                ))
+            })?;
+
+            // ReadOnlyCell<u8> is repr(transparent) over UnsafeCell<u8>, so this is safe.
+            let bytes = unsafe { std::slice::from_raw_parts(cells.as_ptr() as *const u8, cells.len()) };
+            let s = std::str::from_utf8(bytes).map_err(|_| {
+                pyo3::exceptions::PyValueError::new_err((
+                    "str is not valid UTF-8: surrogates not allowed".to_string(),
+                    0_usize,
+                ))
+            })?;
+            strict::strict_parse(s)
+        };
+        parsed.map_err(|e| pyo3::exceptions::PyValueError::new_err((e.message, e.pos)))?
+    } else {
+        return Err(pyo3::exceptions::PyValueError::new_err((
+            "input must be bytes, bytearray, memoryview, or str".to_string(),
+            0_usize,
+        )));
+    };
+
+    Ok(json_to_py(py, &parsed))
 }
 
 fn py_to_repair_action(obj: &Bound<'_, PyAny>) -> PyResult<RepairAction> {
@@ -108,6 +167,8 @@ fn options_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<RepairOptions> {
     set_opt!("min_elements_for_parallel", min_elements_for_parallel, usize);
     set_opt!("density_threshold", density_threshold, f64);
     set_opt!("parallel_chunk_bytes", parallel_chunk_bytes, usize);
+    set_opt!("deterministic_seed", deterministic_seed, u64);
+    set_opt!("debug", debug, bool);
 
     if let Some(v) = d.get_item("parallel_workers")? {
         if v.is_none() {
@@ -119,6 +180,14 @@ fn options_from_dict(d: Option<&Bound<'_, PyDict>>) -> PyResult<RepairOptions> {
     }
     set_opt!("parallel_backend", parallel_backend, String);
     set_opt!("scale_output", scale_output, String);
+
+    if let Some(v) = d.get_item("scale_target_keys")? {
+        if v.is_none() {
+            opt.scale_target_keys = None;
+        } else {
+            opt.scale_target_keys = Some(v.extract::<Vec<String>>()?);
+        }
+    }
 
     if let Some(v) = d.get_item("schema")? {
         if v.is_none() {
@@ -166,7 +235,7 @@ fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<JsonValue> {
 }
 
 fn candidate_to_pydict<'py>(py: Python<'py>, c: &Candidate) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
+    let d = PyDict::new(py);
     d.set_item("candidate_id", c.candidate_id)?;
     d.set_item("value", c.value.as_ref().map(|v| json_to_py(py, v)).unwrap_or(py.None()))?;
     d.set_item("normalized_json", c.normalized_json.clone())?;
@@ -174,9 +243,9 @@ fn candidate_to_pydict<'py>(py: Python<'py>, c: &Candidate) -> PyResult<Bound<'p
     d.set_item("confidence", c.confidence)?;
     d.set_item("cost", c.cost)?;
 
-    let repairs = PyList::empty_bound(py);
+    let repairs = PyList::empty(py);
     for r in &c.repairs {
-        let rr = PyDict::new_bound(py);
+        let rr = PyDict::new(py);
         rr.set_item("op", r.op.clone())?;
         rr.set_item("span", r.span)?;
         rr.set_item("at", r.at)?;
@@ -187,12 +256,12 @@ fn candidate_to_pydict<'py>(py: Python<'py>, c: &Candidate) -> PyResult<Bound<'p
     }
     d.set_item("repairs", repairs)?;
 
-    let validations = PyDict::new_bound(py);
+    let validations = PyDict::new(py);
     validations.set_item("strict_json_parse", c.validations.strict_json_parse)?;
     validations.set_item("schema_match", c.validations.schema_match)?;
     d.set_item("validations", validations)?;
 
-    let diag = PyDict::new_bound(py);
+    let diag = PyDict::new(py);
     diag.set_item("garbage_skipped_bytes", c.diagnostics.garbage_skipped_bytes)?;
     diag.set_item("deleted_tokens", c.diagnostics.deleted_tokens)?;
     diag.set_item("inserted_tokens", c.diagnostics.inserted_tokens)?;
@@ -201,7 +270,7 @@ fn candidate_to_pydict<'py>(py: Python<'py>, c: &Candidate) -> PyResult<Bound<'p
     diag.set_item("max_repairs", c.diagnostics.max_repairs)?;
     d.set_item("diagnostics", diag)?;
 
-    let dropped = PyList::empty_bound(py);
+    let dropped = PyList::empty(py);
     for (s, e) in &c.dropped_spans {
         dropped.append((*s, *e))?;
     }
@@ -210,7 +279,7 @@ fn candidate_to_pydict<'py>(py: Python<'py>, c: &Candidate) -> PyResult<Bound<'p
 }
 
 fn repair_action_to_pydict<'py>(py: Python<'py>, r: &RepairAction) -> PyResult<Bound<'py, PyDict>> {
-    let d = PyDict::new_bound(py);
+    let d = PyDict::new(py);
     d.set_item("op", r.op.clone())?;
     d.set_item("span", r.span)?;
     d.set_item("at", r.at)?;
@@ -221,6 +290,7 @@ fn repair_action_to_pydict<'py>(py: Python<'py>, r: &RepairAction) -> PyResult<B
 }
 
 #[pyfunction]
+#[pyo3(signature = (input, options=None))]
 fn parse_py(py: Python<'_>, input: &Bound<'_, PyAny>, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject> {
     let mut opt = options_from_dict(options)?;
     // LLM orchestration is done in Python; keep Rust strictly deterministic here.
@@ -238,6 +308,7 @@ fn parse_py(py: Python<'_>, input: &Bound<'_, PyAny>, options: Option<&Bound<'_,
 }
 
 #[pyfunction]
+#[pyo3(signature = (input, options=None))]
 fn preprocess_py(py: Python<'_>, input: &Bound<'_, PyAny>, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject> {
     let opt = options_from_dict(options)?;
 
@@ -259,7 +330,7 @@ fn preprocess_py(py: Python<'_>, input: &Bound<'_, PyAny>, options: Option<&Boun
 
     let error_pos = strict::strict_parse(&repaired_text).err().map(|e| e.pos);
 
-    let out = PyDict::new_bound(py);
+    let out = PyDict::new(py);
     out.set_item("extracted_span", (extraction.span.0, extraction.span.1))?;
     out.set_item("extracted_text", extracted_text)?;
     out.set_item("repaired_text", repaired_text)?;
@@ -267,16 +338,17 @@ fn preprocess_py(py: Python<'_>, input: &Bound<'_, PyAny>, options: Option<&Boun
     out.set_item("method", extraction.method)?;
     out.set_item("error_pos", error_pos)?;
 
-    let repairs = PyList::empty_bound(py);
+    let repairs = PyList::empty(py);
     for r in &base_repairs {
         repairs.append(repair_action_to_pydict(py, r)?)?;
     }
     out.set_item("base_repairs", repairs)?;
 
-    Ok(out.to_object(py))
+    Ok(out.into_any().unbind())
 }
 
 #[pyfunction]
+#[pyo3(signature = (extracted_text, options=None, base_repairs=None))]
 fn probabilistic_repair_py(
     py: Python<'_>,
     extracted_text: &str,
@@ -291,31 +363,33 @@ fn probabilistic_repair_py(
         }
     }
     let cands = beam::probabilistic_repair(extracted_text, &opt, &repairs);
-    let out = PyList::empty_bound(py);
+    let out = PyList::empty(py);
     for c in &cands {
         out.append(candidate_to_pydict(py, c)?)?;
     }
-    Ok(out.to_object(py))
+    Ok(out.into_any().unbind())
 }
 
 #[pyfunction]
+#[pyo3(signature = (data, options=None))]
 fn parse_root_array_scale_py(py: Python<'_>, data: &Bound<'_, PyBytes>, options: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject> {
     let opt = options_from_dict(options)?;
     let (value, plan) = scale::parse_root_array_scale(data.as_bytes(), &opt)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e))?;
-    let out = PyDict::new_bound(py);
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let out = PyDict::new(py);
     out.set_item("value", json_to_py(py, &value))?;
-    let plan_d = PyDict::new_bound(py);
+    let plan_d = PyDict::new(py);
     plan_d.set_item("mode", plan.mode.to_string())?;
     plan_d.set_item("elements", plan.elements)?;
     plan_d.set_item("structural_density", plan.structural_density)?;
     plan_d.set_item("chunk_count", plan.chunk_count)?;
     out.set_item("plan", plan_d)?;
-    Ok(out.to_object(py))
+    Ok(out.into_any().unbind())
 }
 
 #[pymodule]
-fn json_prob_parser_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn agentjson_rust(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(strict_loads_py, m)?)?;
     m.add_function(wrap_pyfunction!(parse_py, m)?)?;
     m.add_function(wrap_pyfunction!(preprocess_py, m)?)?;
     m.add_function(wrap_pyfunction!(probabilistic_repair_py, m)?)?;

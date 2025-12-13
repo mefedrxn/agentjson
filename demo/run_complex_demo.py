@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Demo script for json-prob-parser with complex broken JSON."""
+"""Demo script for agentjson with complex broken JSON."""
 
 import json
 import sys
@@ -7,7 +7,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from json_prob_parser import parse, RepairOptions
+from agentjson import parse, RepairOptions
 
 
 def main():

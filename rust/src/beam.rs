@@ -80,35 +80,97 @@ fn pop_trailing_comma(mut state: State) -> Option<State> {
     Some(state)
 }
 
-fn add_repair(
-    mut state: State,
-    op: &str,
-    cost_delta: f64,
-    span: Option<(usize, usize)>,
-    at: Option<usize>,
-    token: Option<&str>,
-    note: Option<String>,
+#[derive(Debug, Clone, Copy, Default)]
+struct RepairDelta {
     inserted_tokens: usize,
     deleted_tokens: usize,
     garbage_skipped_bytes: usize,
-    dropped_span: Option<(usize, usize)>,
-) -> State {
-    let mut action = RepairAction::new(op, cost_delta);
-    action.span = span;
-    action.at = at;
-    action.token = token.map(|s| s.to_string());
-    action.note = note;
+}
 
-    state.cost += cost_delta;
+#[derive(Debug, Clone)]
+struct RepairSpec<'a> {
+    op: &'a str,
+    cost_delta: f64,
+    span: Option<(usize, usize)>,
+    at: Option<usize>,
+    token: Option<&'a str>,
+    note: Option<String>,
+    delta: RepairDelta,
+    dropped_span: Option<(usize, usize)>,
+}
+
+impl<'a> RepairSpec<'a> {
+    fn new(op: &'a str, cost_delta: f64) -> Self {
+        Self {
+            op,
+            cost_delta,
+            span: None,
+            at: None,
+            token: None,
+            note: None,
+            delta: RepairDelta::default(),
+            dropped_span: None,
+        }
+    }
+
+    fn span(mut self, span: (usize, usize)) -> Self {
+        self.span = Some(span);
+        self
+    }
+
+    fn at(mut self, at: usize) -> Self {
+        self.at = Some(at);
+        self
+    }
+
+    fn token(mut self, token: &'a str) -> Self {
+        self.token = Some(token);
+        self
+    }
+
+    fn note(mut self, note: String) -> Self {
+        self.note = Some(note);
+        self
+    }
+
+    fn inserted_tokens(mut self, n: usize) -> Self {
+        self.delta.inserted_tokens = n;
+        self
+    }
+
+    fn deleted_tokens(mut self, n: usize) -> Self {
+        self.delta.deleted_tokens = n;
+        self
+    }
+
+    fn garbage_skipped_bytes(mut self, n: usize) -> Self {
+        self.delta.garbage_skipped_bytes = n;
+        self
+    }
+
+    fn dropped_span(mut self, span: (usize, usize)) -> Self {
+        self.dropped_span = Some(span);
+        self
+    }
+}
+
+fn add_repair(mut state: State, spec: RepairSpec<'_>) -> State {
+    let mut action = RepairAction::new(spec.op, spec.cost_delta);
+    action.span = spec.span;
+    action.at = spec.at;
+    action.token = spec.token.map(|s| s.to_string());
+    action.note = spec.note;
+
+    state.cost += spec.cost_delta;
     state.repairs.push(action);
     state.repair_count += 1;
-    state.inserted_tokens += inserted_tokens;
-    state.deleted_tokens += deleted_tokens;
-    state.garbage_skipped_bytes += garbage_skipped_bytes;
-    if op == "close_open_string" {
+    state.inserted_tokens += spec.delta.inserted_tokens;
+    state.deleted_tokens += spec.delta.deleted_tokens;
+    state.garbage_skipped_bytes += spec.delta.garbage_skipped_bytes;
+    if spec.op == "close_open_string" {
         state.close_open_string_count += 1;
     }
-    if let Some(ds) = dropped_span {
+    if let Some(ds) = spec.dropped_span {
         state.dropped_spans.push(ds);
     }
     state
@@ -269,35 +331,15 @@ fn consume_key(state: State, token: &Token, opt: &RepairOptions) -> Option<State
         if token.quote == Some('\'') && opt.allow_single_quotes {
             s2 = add_repair(
                 s2,
-                "convert_single_to_double_quotes",
-                COST_CONVERT_SINGLE_QUOTES,
-                Some((token.start, token.end)),
-                None,
-                None,
-                None,
-                0,
-                0,
-                0,
-                None,
+                RepairSpec::new("convert_single_to_double_quotes", COST_CONVERT_SINGLE_QUOTES)
+                    .span((token.start, token.end)),
             );
         }
         if !token.closed {
             if close_open_count >= opt.max_close_open_string {
                 return None;
             }
-            s2 = add_repair(
-                s2,
-                "close_open_string",
-                COST_CLOSE_OPEN_STRING,
-                None,
-                Some(token.end),
-                None,
-                None,
-                0,
-                0,
-                0,
-                None,
-            );
+            s2 = add_repair(s2, RepairSpec::new("close_open_string", COST_CLOSE_OPEN_STRING).at(token.end));
         }
         return Some(s2);
     }
@@ -306,19 +348,7 @@ fn consume_key(state: State, token: &Token, opt: &RepairOptions) -> Option<State
         let mut s2 = append_out(state, &quote_json_string(&token.value));
         s2 = advance(s2, 1);
         s2 = set_top_expect(s2, Expect::Colon);
-        s2 = add_repair(
-            s2,
-            "wrap_key_with_quotes",
-            COST_WRAP_KEY,
-            Some((token.start, token.end)),
-            None,
-            None,
-            None,
-            0,
-            0,
-            0,
-            None,
-        );
+        s2 = add_repair(s2, RepairSpec::new("wrap_key_with_quotes", COST_WRAP_KEY).span((token.start, token.end)));
         return Some(s2);
     }
 
@@ -346,35 +376,15 @@ fn consume_value_primitive(state: State, token: &Token, opt: &RepairOptions) -> 
         if token.quote == Some('\'') && opt.allow_single_quotes {
             s2 = add_repair(
                 s2,
-                "convert_single_to_double_quotes",
-                COST_CONVERT_SINGLE_QUOTES,
-                Some((token.start, token.end)),
-                None,
-                None,
-                None,
-                0,
-                0,
-                0,
-                None,
+                RepairSpec::new("convert_single_to_double_quotes", COST_CONVERT_SINGLE_QUOTES)
+                    .span((token.start, token.end)),
             );
         }
         if !token.closed {
             if close_open_count >= opt.max_close_open_string {
                 return None;
             }
-            s2 = add_repair(
-                s2,
-                "close_open_string",
-                COST_CLOSE_OPEN_STRING,
-                None,
-                Some(token.end),
-                None,
-                None,
-                0,
-                0,
-                0,
-                None,
-            );
+            s2 = add_repair(s2, RepairSpec::new("close_open_string", COST_CLOSE_OPEN_STRING).at(token.end));
         }
         return Some(s2);
     }
@@ -410,16 +420,9 @@ fn consume_value_primitive(state: State, token: &Token, opt: &RepairOptions) -> 
                 if !matches!(low.as_str(), "true" | "false" | "null") {
                     s2 = add_repair(
                         s2,
-                        "map_python_literal",
-                        COST_PY_LITERAL_MAP,
-                        Some((token.start, token.end)),
-                        None,
-                        None,
-                        Some(format!("{v} -> {mapped}")),
-                        0,
-                        0,
-                        0,
-                        None,
+                        RepairSpec::new("map_python_literal", COST_PY_LITERAL_MAP)
+                            .span((token.start, token.end))
+                            .note(format!("{v} -> {mapped}")),
                     );
                 }
                 return Some(s2);
@@ -432,16 +435,7 @@ fn consume_value_primitive(state: State, token: &Token, opt: &RepairOptions) -> 
             s2 = complete_value_in_current_context(s2);
             s2 = add_repair(
                 s2,
-                "wrap_value_with_quotes",
-                COST_WRAP_VALUE,
-                Some((token.start, token.end)),
-                None,
-                None,
-                None,
-                0,
-                0,
-                0,
-                None,
+                RepairSpec::new("wrap_value_with_quotes", COST_WRAP_VALUE).span((token.start, token.end)),
             );
             return Some(s2);
         }
@@ -478,37 +472,13 @@ fn repair_remove_trailing_comma_before_end(state: State, token: &Token) -> Optio
     if top.typ == ContainerType::Object && token.value == "}" && top.expect == Expect::KeyOrEnd {
         let mut popped = pop_trailing_comma(state)?;
         popped = set_top_expect(popped, Expect::CommaOrEnd);
-        popped = add_repair(
-            popped,
-            "remove_trailing_comma",
-            COST_REMOVE_TRAILING_COMMA,
-            None,
-            Some(token.start),
-            None,
-            None,
-            0,
-            0,
-            0,
-            None,
-        );
+        popped = add_repair(popped, RepairSpec::new("remove_trailing_comma", COST_REMOVE_TRAILING_COMMA).at(token.start));
         return Some(popped);
     }
     if top.typ == ContainerType::Array && token.value == "]" && top.expect == Expect::ValueOrEnd {
         let mut popped = pop_trailing_comma(state)?;
         popped = set_top_expect(popped, Expect::CommaOrEnd);
-        popped = add_repair(
-            popped,
-            "remove_trailing_comma",
-            COST_REMOVE_TRAILING_COMMA,
-            None,
-            Some(token.start),
-            None,
-            None,
-            0,
-            0,
-            0,
-            None,
-        );
+        popped = add_repair(popped, RepairSpec::new("remove_trailing_comma", COST_REMOVE_TRAILING_COMMA).at(token.start));
         return Some(popped);
     }
     None
@@ -537,16 +507,10 @@ fn repair_insert_missing_comma(state: State, token: &Token) -> Option<State> {
         s = set_top_expect(s, Expect::ValueOrEnd);
         s = add_repair(
             s,
-            "insert_missing_comma",
-            cost,
-            None,
-            Some(token.start),
-            Some(","),
-            None,
-            1,
-            0,
-            0,
-            None,
+            RepairSpec::new("insert_missing_comma", cost)
+                .at(token.start)
+                .token(",")
+                .inserted_tokens(1),
         );
         return Some(s);
     }
@@ -555,16 +519,10 @@ fn repair_insert_missing_comma(state: State, token: &Token) -> Option<State> {
         s = set_top_expect(s, Expect::KeyOrEnd);
         s = add_repair(
             s,
-            "insert_missing_comma",
-            cost,
-            None,
-            Some(token.start),
-            Some(","),
-            None,
-            1,
-            0,
-            0,
-            None,
+            RepairSpec::new("insert_missing_comma", cost)
+                .at(token.start)
+                .token(",")
+                .inserted_tokens(1),
         );
         return Some(s);
     }
@@ -584,16 +542,10 @@ fn repair_insert_missing_colon(state: State, token: &Token) -> Option<State> {
         s = set_top_expect(s, Expect::Value);
         s = add_repair(
             s,
-            "insert_missing_colon",
-            COST_INSERT_MISSING_COLON,
-            None,
-            Some(token.start),
-            Some(":"),
-            None,
-            1,
-            0,
-            0,
-            None,
+            RepairSpec::new("insert_missing_colon", COST_INSERT_MISSING_COLON)
+                .at(token.start)
+                .token(":")
+                .inserted_tokens(1),
         );
         return Some(s);
     }
@@ -612,16 +564,9 @@ fn repair_skip_garbage(state: State, token: &Token, opt: &RepairOptions) -> Opti
     let mut s = advance(state, 1);
     s = add_repair(
         s,
-        "skip_garbage",
-        cost,
-        Some((token.start, token.end)),
-        None,
-        None,
-        None,
-        0,
-        0,
-        tok_len,
-        None,
+        RepairSpec::new("skip_garbage", cost)
+            .span((token.start, token.end))
+            .garbage_skipped_bytes(tok_len),
     );
     Some(s)
 }
@@ -636,16 +581,9 @@ fn repair_delete_unexpected(state: State, token: &Token, opt: &RepairOptions) ->
     let mut s = advance(state, 1);
     s = add_repair(
         s,
-        "delete_unexpected_token",
-        COST_DELETE_TOKEN,
-        Some((token.start, token.end)),
-        None,
-        None,
-        None,
-        0,
-        1,
-        0,
-        None,
+        RepairSpec::new("delete_unexpected_token", COST_DELETE_TOKEN)
+            .span((token.start, token.end))
+            .deleted_tokens(1),
     );
     Some(s)
 }
@@ -668,16 +606,9 @@ fn repair_truncate_suffix(state: State, token: &Token, text_len: usize, eof_inde
     s.i = eof_index;
     s = add_repair(
         s,
-        "truncate_suffix",
-        cost,
-        Some((token.start, text_len)),
-        None,
-        None,
-        None,
-        0,
-        0,
-        0,
-        Some((token.start, text_len)),
+        RepairSpec::new("truncate_suffix", cost)
+            .span((token.start, text_len))
+            .dropped_span((token.start, text_len)),
     );
     Some(s)
 }
@@ -701,16 +632,10 @@ fn repair_synthesize_missing_value(state: State, token: &Token) -> Option<State>
         let mut s = append_out(state, "null");
         s = add_repair(
             s,
-            "synthesize_missing_value",
-            COST_SYNTHESIZE_VALUE,
-            None,
-            Some(token.start),
-            Some("null"),
-            None,
-            1,
-            0,
-            0,
-            None,
+            RepairSpec::new("synthesize_missing_value", COST_SYNTHESIZE_VALUE)
+                .at(token.start)
+                .token("null")
+                .inserted_tokens(1),
         );
         s = complete_value_in_current_context(s);
         return Some(s);
@@ -728,19 +653,8 @@ fn repair_close_one_container_at_eof(state: State, token: &Token) -> Option<Stat
     if top.typ == ContainerType::Object && top.expect == Expect::KeyOrEnd {
         if let Some(mut popped) = pop_trailing_comma(s.clone()) {
             popped = set_top_expect(popped, Expect::CommaOrEnd);
-            popped = add_repair(
-                popped,
-                "remove_trailing_comma",
-                COST_REMOVE_TRAILING_COMMA,
-                None,
-                Some(token.start),
-                None,
-                None,
-                0,
-                0,
-                0,
-                None,
-            );
+            popped =
+                add_repair(popped, RepairSpec::new("remove_trailing_comma", COST_REMOVE_TRAILING_COMMA).at(token.start));
             s = popped;
             top = s.stack.last().cloned()?;
         }
@@ -748,19 +662,8 @@ fn repair_close_one_container_at_eof(state: State, token: &Token) -> Option<Stat
     if top.typ == ContainerType::Array && top.expect == Expect::ValueOrEnd {
         if let Some(mut popped) = pop_trailing_comma(s.clone()) {
             popped = set_top_expect(popped, Expect::CommaOrEnd);
-            popped = add_repair(
-                popped,
-                "remove_trailing_comma",
-                COST_REMOVE_TRAILING_COMMA,
-                None,
-                Some(token.start),
-                None,
-                None,
-                0,
-                0,
-                0,
-                None,
-            );
+            popped =
+                add_repair(popped, RepairSpec::new("remove_trailing_comma", COST_REMOVE_TRAILING_COMMA).at(token.start));
             s = popped;
             top = s.stack.last().cloned()?;
         }
@@ -771,16 +674,10 @@ fn repair_close_one_container_at_eof(state: State, token: &Token) -> Option<Stat
     s.stack.pop();
     s = add_repair(
         s,
-        "insert_missing_closer",
-        COST_CLOSE_CONTAINER,
-        None,
-        Some(token.start),
-        Some(closer),
-        None,
-        1,
-        0,
-        0,
-        None,
+        RepairSpec::new("insert_missing_closer", COST_CLOSE_CONTAINER)
+            .at(token.start)
+            .token(closer)
+            .inserted_tokens(1),
     );
     s = complete_value_in_current_context(s);
     Some(s)
@@ -883,32 +780,121 @@ fn signature(state: &State) -> Signature {
     }
 }
 
-fn prune(states: Vec<State>, beam_width: usize) -> Vec<State> {
-    let mut best: HashMap<Signature, State> = HashMap::new();
-    for s in states {
-        let sig = signature(&s);
-        let replace = match best.get(&sig) {
-            None => true,
-            Some(prev) => s.cost < prev.cost,
+const FNV_OFFSET_BASIS_U64: u64 = 14695981039346656037;
+const FNV_PRIME_U64: u64 = 1099511628211;
+
+fn fnv1a_u64(mut h: u64, bytes: &[u8]) -> u64 {
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME_U64);
+    }
+    h
+}
+
+fn fnv1a_u64_mix_u64(h: u64, x: u64) -> u64 {
+    fnv1a_u64(h, &x.to_le_bytes())
+}
+
+fn stable_fingerprint(sig: &Signature, seed: u64) -> u64 {
+    let mut h = FNV_OFFSET_BASIS_U64 ^ seed;
+    h = fnv1a_u64_mix_u64(h, sig.i as u64);
+    h = fnv1a_u64(h, &[sig.root_done as u8]);
+    h = fnv1a_u64_mix_u64(h, sig.stack.len() as u64);
+    for f in &sig.stack {
+        let typ = match f.typ {
+            ContainerType::Object => 1u8,
+            ContainerType::Array => 2u8,
         };
-        if replace {
-            best.insert(sig, s);
+        let expect = match f.expect {
+            Expect::KeyOrEnd => 1u8,
+            Expect::Colon => 2u8,
+            Expect::Value => 3u8,
+            Expect::ValueOrEnd => 4u8,
+            Expect::CommaOrEnd => 5u8,
+        };
+        h = fnv1a_u64(h, &[typ, expect]);
+    }
+    h = fnv1a_u64(h, sig.tail.as_bytes());
+    h
+}
+
+fn state_fingerprint(state: &State, seed: u64) -> u64 {
+    let sig = signature(state);
+    let mut h = stable_fingerprint(&sig, seed);
+    h = fnv1a_u64_mix_u64(h, state.repairs.len() as u64);
+    for r in &state.repairs {
+        h = fnv1a_u64(h, r.op.as_bytes());
+        if let Some((s, e)) = r.span {
+            h = fnv1a_u64_mix_u64(h, s as u64);
+            h = fnv1a_u64_mix_u64(h, e as u64);
+        } else {
+            h = fnv1a_u64_mix_u64(h, u64::MAX);
+            h = fnv1a_u64_mix_u64(h, u64::MAX);
+        }
+        h = fnv1a_u64_mix_u64(h, r.at.unwrap_or(usize::MAX) as u64);
+        if let Some(tok) = r.token.as_ref() {
+            h = fnv1a_u64(h, tok.as_bytes());
+        }
+        h = fnv1a_u64_mix_u64(h, r.cost_delta.to_bits());
+        if let Some(note) = r.note.as_ref() {
+            h = fnv1a_u64(h, note.as_bytes());
         }
     }
-    let mut out: Vec<State> = best.into_values().collect();
-    out.sort_by(|a, b| {
-        let c = a.cost.total_cmp(&b.cost);
+    h
+}
+
+#[derive(Clone, Copy)]
+struct PruneKey {
+    cost: f64,
+    repair_count: usize,
+    i: usize,
+    fp: u64,
+}
+
+impl PruneKey {
+    fn cmp(self, other: Self) -> std::cmp::Ordering {
+        let c = self.cost.total_cmp(&other.cost);
         if c != std::cmp::Ordering::Equal {
             return c;
         }
-        let c2 = a.repair_count.cmp(&b.repair_count);
+        let c2 = self.repair_count.cmp(&other.repair_count);
         if c2 != std::cmp::Ordering::Equal {
             return c2;
         }
-        a.i.cmp(&b.i)
-    });
+        let c3 = self.i.cmp(&other.i);
+        if c3 != std::cmp::Ordering::Equal {
+            return c3;
+        }
+        self.fp.cmp(&other.fp)
+    }
+}
+
+fn make_prune_key(state: &State, seed: u64) -> PruneKey {
+    PruneKey {
+        cost: state.cost,
+        repair_count: state.repair_count,
+        i: state.i,
+        fp: state_fingerprint(state, seed),
+    }
+}
+
+fn prune(states: Vec<State>, beam_width: usize, seed: u64) -> Vec<State> {
+    let mut best: HashMap<Signature, (PruneKey, State)> = HashMap::new();
+    for s in states {
+        let sig = signature(&s);
+        let key = make_prune_key(&s, seed);
+        let replace = match best.get(&sig) {
+            None => true,
+            Some((prev_key, _)) => key.cmp(*prev_key) == std::cmp::Ordering::Less,
+        };
+        if replace {
+            best.insert(sig, (key, s));
+        }
+    }
+    let mut out: Vec<(PruneKey, State)> = best.into_values().collect();
+    out.sort_by(|(a, _), (b, _)| a.cmp(*b));
     out.truncate(beam_width);
-    out
+    out.into_iter().map(|(_, s)| s).collect()
 }
 
 fn is_finished(state: &State, token: &Token) -> bool {
@@ -966,16 +952,9 @@ pub fn probabilistic_repair(extracted_text: &str, opt: &RepairOptions, base_repa
                 let mut s2 = advance(s.clone(), 1);
                 s2 = add_repair(
                     s2,
-                    "skip_suffix",
-                    cost,
-                    Some((tok.start, tok.end)),
-                    None,
-                    None,
-                    None,
-                    0,
-                    0,
-                    tok_len,
-                    None,
+                    RepairSpec::new("skip_suffix", cost)
+                        .span((tok.start, tok.end))
+                        .garbage_skipped_bytes(tok_len),
                 );
                 next_states.push(s2);
                 continue;
@@ -1007,7 +986,7 @@ pub fn probabilistic_repair(extracted_text: &str, opt: &RepairOptions, base_repa
             ));
         }
 
-        beam = prune(next_states, opt.beam_width);
+        beam = prune(next_states, opt.beam_width, opt.deterministic_seed);
         if finals.len() >= opt.top_k.saturating_mul(3) {
             break;
         }
@@ -1015,8 +994,16 @@ pub fn probabilistic_repair(extracted_text: &str, opt: &RepairOptions, base_repa
 
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut seen_norm: HashSet<String> = HashSet::new();
-    finals.sort_by(|a, b| a.cost.total_cmp(&b.cost));
-    for s in finals {
+    let seed = opt.deterministic_seed;
+    let mut finals_keyed: Vec<(PruneKey, State)> = finals
+        .into_iter()
+        .map(|s| {
+            let k = make_prune_key(&s, seed);
+            (k, s)
+        })
+        .collect();
+    finals_keyed.sort_by(|(a, _), (b, _)| a.cmp(*b));
+    for (_k, s) in finals_keyed {
         let norm = s.out.join("").trim().to_string();
         if norm.is_empty() {
             continue;
@@ -1060,4 +1047,40 @@ pub fn probabilistic_repair(extracted_text: &str, opt: &RepairOptions, base_repa
     }
 
     candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prune_is_deterministic_with_seed() {
+        let base = State {
+            i: 0,
+            stack: Vec::new(),
+            root_done: false,
+            out: vec!["x".to_string()],
+            cost: 0.0,
+            repairs: Vec::new(),
+            repair_count: 0,
+            garbage_skipped_bytes: 0,
+            deleted_tokens: 0,
+            inserted_tokens: 0,
+            close_open_string_count: 0,
+            dropped_spans: Vec::new(),
+        };
+
+        let mut s1 = base.clone();
+        s1.out = vec!["1".to_string()];
+        let mut s2 = base.clone();
+        s2.out = vec!["2".to_string()];
+
+        let o1 = prune(vec![s1.clone(), s2.clone()], 2, 123);
+        let o2 = prune(vec![s2, s1], 2, 123);
+
+        assert_eq!(o1.len(), 2);
+        assert_eq!(o2.len(), 2);
+        assert_eq!(o1[0].out[0], o2[0].out[0]);
+        assert_eq!(o1[1].out[0], o2[1].out[0]);
+    }
 }

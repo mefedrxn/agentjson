@@ -4,7 +4,7 @@ use crate::beam::probabilistic_repair;
 use crate::extract::extract_json_candidate;
 use crate::heuristic::heuristic_repair;
 use crate::json::JsonValue;
-use crate::llm_arbiter::maybe_llm_rerun;
+use crate::llm_fallback::maybe_llm_rerun;
 use crate::scale::{parse_root_array_scale, parse_root_array_scale_tape};
 use crate::schema::schema_match_score;
 use crate::strict::strict_parse;
@@ -29,6 +29,31 @@ fn extraction_debug_json(extracted_span: (usize, usize), truncated: bool, method
             JsonValue::Array(repairs.iter().map(|r| r.to_json_value()).collect()),
         ),
     ])
+}
+
+fn is_ws_byte(b: u8) -> bool {
+    matches!(b, b'\t' | b'\n' | b'\r' | b' ')
+}
+
+fn trim_ws_bytes(data: &[u8]) -> (usize, usize) {
+    let mut start = 0usize;
+    let mut end = data.len();
+    // UTF-8 BOM
+    if end >= 3 && &data[..3] == b"\xEF\xBB\xBF" {
+        start = 3;
+    }
+    while start < end && is_ws_byte(data[start]) {
+        start += 1;
+    }
+    while end > start && is_ws_byte(data[end - 1]) {
+        end -= 1;
+    }
+    (start, end)
+}
+
+fn allow_parallel_is_false(s: &str) -> bool {
+    let v = s.trim().to_ascii_lowercase();
+    v == "false" || v == "0" || v == "no"
 }
 
 fn sum_cost(repairs: &[RepairAction]) -> f64 {
@@ -89,36 +114,6 @@ fn rank_candidates(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
     candidates
 }
 
-fn make_candidate(
-    candidate_id: usize,
-    value: JsonValue,
-    normalized_json: Option<String>,
-    repairs: Vec<RepairAction>,
-    cost: f64,
-    confidence: f64,
-    strict_ok: bool,
-    schema_match: Option<f64>,
-    diagnostics: CandidateDiagnostics,
-    dropped_spans: Vec<(usize, usize)>,
-    ir: Option<JsonValue>,
-) -> Candidate {
-    Candidate {
-        candidate_id,
-        value: Some(value),
-        normalized_json,
-        ir,
-        confidence,
-        cost,
-        repairs,
-        validations: CandidateValidations {
-            strict_json_parse: strict_ok,
-            schema_match,
-        },
-        diagnostics,
-        dropped_spans,
-    }
-}
-
 pub fn arbiter_parse(input_text_or_bytes: impl AsRef<[u8]>, options: Option<&RepairOptions>) -> RepairResult {
     let opt = options.cloned().unwrap_or_else(RepairOptions::default);
     parse_bytes(input_text_or_bytes.as_ref(), &opt)
@@ -131,6 +126,117 @@ pub fn parse(input_text: &str, options: &RepairOptions) -> RepairResult {
 pub fn parse_bytes(input_bytes: &[u8], options: &RepairOptions) -> RepairResult {
     let t0 = Instant::now();
     let input_size = input_bytes.len();
+
+    if options.mode == "auto"
+        && !allow_parallel_is_false(&options.allow_parallel)
+        && input_size >= options.parallel_threshold_bytes
+    {
+        let (s0, e0) = trim_ws_bytes(input_bytes);
+        if matches!(input_bytes.get(s0), Some(b'[') | Some(b'{')) && e0 > s0 {
+            if options.scale_output == "tape" {
+                if let Ok((tape, plan)) = parse_root_array_scale_tape(input_bytes, options) {
+                    let elapsed = t0.elapsed().as_millis();
+                    let mut ir_pairs = vec![
+                        ("split_mode".to_string(), JsonValue::String(plan.mode.to_string())),
+                        ("chunks".to_string(), JsonValue::NumberU64(plan.chunk_count as u64)),
+                        ("elements".to_string(), JsonValue::NumberU64(plan.elements as u64)),
+                    ];
+                    ir_pairs.push((
+                        "tape".to_string(),
+                        tape.to_json_value(if options.debug { Some(10_000) } else { None }),
+                    ));
+                    let candidate = Candidate {
+                        candidate_id: 0,
+                        value: None,
+                        normalized_json: None,
+                        ir: Some(JsonValue::Object(ir_pairs)),
+                        confidence: 1.0,
+                        cost: 0.0,
+                        repairs: Vec::new(),
+                        validations: CandidateValidations {
+                            strict_json_parse: true,
+                            schema_match: None,
+                        },
+                        diagnostics: CandidateDiagnostics {
+                            beam_width: Some(0),
+                            max_repairs: Some(0),
+                            ..CandidateDiagnostics::default()
+                        },
+                        dropped_spans: Vec::new(),
+                    };
+                    let mut metrics = Metrics::new("auto_scale");
+                    metrics.elapsed_ms = elapsed;
+                    metrics.split_mode = plan.mode.to_string();
+                    metrics.parallel_workers = options.parallel_workers.unwrap_or(0);
+                    metrics.elements = plan.elements;
+                    metrics.structural_density = plan.structural_density;
+
+                    return RepairResult {
+                        status: "strict_ok".to_string(),
+                        best_index: Some(0),
+                        input_stats: InputStats {
+                            input_bytes: input_size,
+                            extracted_span: (0, input_size),
+                            prefix_skipped_bytes: 0,
+                            suffix_skipped_bytes: 0,
+                        },
+                        candidates: vec![candidate],
+                        partial: None,
+                        errors: Vec::new(),
+                        metrics,
+                        debug: None,
+                    };
+                }
+            } else if let Ok((value, plan)) = parse_root_array_scale(input_bytes, options) {
+                let elapsed = t0.elapsed().as_millis();
+                let candidate = Candidate {
+                    candidate_id: 0,
+                    value: Some(value),
+                    normalized_json: None,
+                    ir: Some(JsonValue::Object(vec![
+                        ("split_mode".to_string(), JsonValue::String(plan.mode.to_string())),
+                        ("chunks".to_string(), JsonValue::NumberU64(plan.chunk_count as u64)),
+                        ("elements".to_string(), JsonValue::NumberU64(plan.elements as u64)),
+                    ])),
+                    confidence: 1.0,
+                    cost: 0.0,
+                    repairs: Vec::new(),
+                    validations: CandidateValidations {
+                        strict_json_parse: true,
+                        schema_match: None,
+                    },
+                    diagnostics: CandidateDiagnostics {
+                        beam_width: Some(0),
+                        max_repairs: Some(0),
+                        ..CandidateDiagnostics::default()
+                    },
+                    dropped_spans: Vec::new(),
+                };
+                let mut metrics = Metrics::new("auto_scale");
+                metrics.elapsed_ms = elapsed;
+                metrics.split_mode = plan.mode.to_string();
+                metrics.parallel_workers = options.parallel_workers.unwrap_or(0);
+                metrics.elements = plan.elements;
+                metrics.structural_density = plan.structural_density;
+
+                return RepairResult {
+                    status: "strict_ok".to_string(),
+                    best_index: Some(0),
+                    input_stats: InputStats {
+                        input_bytes: input_size,
+                        extracted_span: (0, input_size),
+                        prefix_skipped_bytes: 0,
+                        suffix_skipped_bytes: 0,
+                    },
+                    candidates: vec![candidate],
+                    partial: None,
+                    errors: Vec::new(),
+                    metrics,
+                    debug: None,
+                };
+            }
+        }
+    }
 
     if options.mode == "scale_pipeline" {
         if options.scale_output == "tape" {
@@ -318,23 +424,25 @@ pub fn parse_bytes(input_bytes: &[u8], options: &RepairOptions) -> RepairResult 
             "repaired".to_string()
         };
         let schema = schema_match_score(&value, options.schema.as_ref());
-        let candidate = make_candidate(
-            0,
-            value,
-            Some(normalized),
-            extraction_repairs,
-            cost,
+        let candidate = Candidate {
+            candidate_id: 0,
+            value: Some(value),
+            normalized_json: Some(normalized),
+            ir: None,
             confidence,
-            true,
-            schema,
-            CandidateDiagnostics {
+            cost,
+            repairs: extraction_repairs,
+            validations: CandidateValidations {
+                strict_json_parse: true,
+                schema_match: schema,
+            },
+            diagnostics: CandidateDiagnostics {
                 beam_width: Some(0),
                 max_repairs: Some(0),
                 ..CandidateDiagnostics::default()
             },
-            Vec::new(),
-            None,
-        );
+            dropped_spans: Vec::new(),
+        };
         let elapsed = t0.elapsed().as_millis();
         return RepairResult {
             status,
@@ -404,23 +512,25 @@ pub fn parse_bytes(input_bytes: &[u8], options: &RepairOptions) -> RepairResult 
                     (-options.confidence_alpha * cost).exp()
                 };
                 let schema = schema_match_score(&value2, options.schema.as_ref());
-                let candidate2 = make_candidate(
-                    0,
-                    value2,
-                    Some(normalized2),
-                    base_repairs,
-                    cost,
+                let candidate2 = Candidate {
+                    candidate_id: 0,
+                    value: Some(value2),
+                    normalized_json: Some(normalized2),
+                    ir: None,
                     confidence,
-                    true,
-                    schema,
-                    CandidateDiagnostics {
+                    cost,
+                    repairs: base_repairs,
+                    validations: CandidateValidations {
+                        strict_json_parse: true,
+                        schema_match: schema,
+                    },
+                    diagnostics: CandidateDiagnostics {
                         beam_width: Some(0),
                         max_repairs: Some(0),
                         ..CandidateDiagnostics::default()
                     },
-                    Vec::new(),
-                    None,
-                );
+                    dropped_spans: Vec::new(),
+                };
                 let elapsed = t0.elapsed().as_millis();
                 return RepairResult {
                     status: "repaired".to_string(),

@@ -20,3 +20,6 @@ demo/*.result.json
 # Local PyO3 extension artifacts (do not commit)
 src/json_prob_parser_rust*.so
 src/json_prob_parser_rust*.dylib
+src/agentjson/*.so
+src/agentjson/*.dylib
+src/agentjson/*.pyd

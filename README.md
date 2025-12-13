@@ -1,15 +1,37 @@
-# json-prob-parser
+# agentjson
 
-A probabilistic JSON repair library powered by Rust with Python bindings. Handles severely broken JSON that standard parsers reject.
+## JSON parser in Rust with automatic fix for agent‑generated outputs
+
+LLMs are great at *structured-ish* output, but real pipelines still see markdown fences, extra prose (“Here’s the JSON…”), trailing commas/smart quotes, missing commas/closers, etc. Strict parsers (`json`, `orjson`, …) treat that as a hard failure → retries, latency, and brittle tool/function-calls.
+
+`agentjson` is a Rust-powered JSON repair pipeline with Python bindings:
+
+- Extract the JSON span from arbitrary text
+- Repair common errors cheaply first (deterministic heuristics)
+- Recover intent via probabilistic **Top‑K** parsing + confidence + repair trace
+- Optionally ask an LLM for a minimal byte-offset patch only when needed, then re-validate
 
 ## Features
 
+- **Extraction**: Strip markdown fences + prefix/suffix garbage and isolate the JSON span
 - **Fast path**: Valid JSON parses immediately
-- **Heuristic repair**: Automatic fixes applied before beam search
-- **Probabilistic beam search**: Returns Top-K repair candidates with confidence scores
-- **LLM fallback**: Optional LLM-assisted repair for extreme cases
+- **Heuristic repair**: Low-cost automatic fixes applied before beam search
+- **Probabilistic Top‑K repair**: Returns multiple candidates with confidence scores + repair traces
+- **Schema-aware ranking (optional)**: Lightweight schema hints help choose the right candidate
+- **Deterministic mode (seeded)**: Make probabilistic results reproducible via `deterministic_seed`
+- **LLM fallback (optional)**: Ask an LLM for a minimal patch only when local repairs are low-confidence
+- **Scale pipeline (huge JSON)**: Safe split-point parallelism + optional tape/IR, with recursive parsing for large nested containers
 
-### What It Can Fix
+### Built for LLM Pipelines
+
+- Accepts raw model text (not just pure JSON) and extracts the JSON span
+- Produces **strict JSON** (or returns Top‑K strict candidates), so downstream schema validation stays simple
+- Returns a repair trace (ops + byte spans) that’s useful for debugging, audits, or “show the model what you meant”
+- Uses an LLM only as a *last resort* (minimal patch + re-validate), keeping latency/cost predictable
+
+In the included “LLM messy JSON” suite, strict parsers fail while `agentjson` succeeds end‑to‑end (see **Benchmarks** below).
+
+### Common LLM Failure Modes
 
 | Issue | Example | Fixed |
 |-------|---------|-------|
@@ -26,29 +48,34 @@ A probabilistic JSON repair library powered by Rust with Python bindings. Handle
 
 ## Installation
 
-### 1. Install Rust toolchain
+### Install (recommended)
+
+```bash
+uv add agentjson
+# or: python -m pip install agentjson
+```
+
+### Build from source (development)
+
+#### 1) Install Rust toolchain
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
 
-### 2. Install the package with PyO3 extension
+#### 2) Build and install the PyO3 extension
 
 ```bash
 # Clone the repository
-git clone https://github.com/anthropics/json-prob-parser.git
-cd json-prob-parser
-
-# Create virtual environment
-python -m venv .venv
+uv venv
 source .venv/bin/activate  # or `.venv\Scripts\activate` on Windows
 
 # Install maturin and build
-pip install maturin
-maturin develop -m rust-pyo3/Cargo.toml
+uv pip install maturin
+maturin develop
 
-# Install the Python package
-pip install -e .
+# Install the Python package (editable)
+uv pip install -e .
 ```
 
 ## Quick Start
@@ -56,7 +83,7 @@ pip install -e .
 ### Python Library
 
 ```python
-from json_prob_parser import parse, RepairOptions
+from agentjson import RepairOptions, parse
 
 # Simple usage
 result = parse('{"a": 1, "b": 2,}')  # trailing comma
@@ -87,17 +114,50 @@ print(len(result.best.repairs))         # number of repairs applied
 print(result.metrics.elapsed_ms)        # processing time
 ```
 
+### Reproducible Top‑K (deterministic_seed)
+
+Beam search can have ties; for debugging and stable output ordering, set `deterministic_seed`:
+
+```python
+result = parse(
+    '{"a": 1 "b": 2}',  # missing comma
+    RepairOptions(
+        mode="probabilistic",
+        top_k=5,
+        deterministic_seed=42,
+    ),
+)
+```
+
+### Schema Hints (pick the right candidate)
+
+When input is ambiguous, return Top‑K and let `agentjson` re-rank candidates using a lightweight schema hint:
+
+```python
+schema = {
+    "required_keys": ["name", "age"],
+    "types": {"name": "str", "age": "int"},
+}
+
+result = parse(
+    '```json\n{name: "Alice", age: 30,}\n```',
+    RepairOptions(mode="probabilistic", top_k=5, schema=schema),
+)
+
+print(result.best.validations.schema_match)  # 0.0 .. 1.0
+```
+
 ### CLI
 
 ```bash
 # From stdin
-echo '{"a": 1, "b": 2,}' | json-prob-parser
+echo '{"a": 1, "b": 2,}' | agentjson
 
 # From file
-json-prob-parser --input broken.json
+agentjson --input broken.json
 
 # With options
-json-prob-parser --input broken.json \
+agentjson --input broken.json \
     --mode probabilistic \
     --beam-width 64 \
     --max-repairs 100 \
@@ -120,6 +180,152 @@ json-prob-parser --input broken.json \
 | `--llm-mode` | `patch_suggest` | `patch_suggest` or `token_suggest` (patch is recommended) |
 | `--llm-min-confidence` | 0.2 | Trigger LLM when best confidence is below this |
 | `--debug` | false | Include debug information |
+
+### What is `tape`?
+
+`tape` is an internal **IR (intermediate representation)** for large JSON:
+
+- A flat list of `TapeEntry`s (token type + byte `offset`/`length` into the original input).
+- Containers (`array_start` / `object_start`) store a “jump” payload to their matching end entry.
+- This makes it cheaper to handle huge payloads (avoid building a full in-memory DOM) and enables safe parallel parse+merge in `scale_pipeline`.
+
+When `scale_output="tape"`:
+
+- `result.best.value` is `None`
+- `result.best.ir["tape"]` contains tape metadata (and, with `debug=True`, a truncated preview of entries)
+
+### FAQ (LLM + JSON)
+
+**“We already use structured output / function calling. Why do we need this?”**  
+Because in production you still get *near-JSON* (code fences, extra prose, a trailing comma, a missing closer). Strict JSON parsing turns that into retries (latency/cost) or brittle failures. `agentjson` is the guardrail: it converts raw model text into strict JSON (or Top‑K strict candidates) and tells you exactly what it changed.
+
+**“Why Top‑K?”**  
+When JSON is corrupted, there can be multiple plausible “intents”. Returning Top‑K candidates + confidence (and optional schema hints) lets you pick the right one deterministically instead of guessing.
+
+**“Is the scale pipeline always faster?”**  
+No—parallel split/merge has overhead. It’s designed for huge valid JSON (GB‑scale root arrays or large nested containers) where scan/parse time dominates. For small inputs, strict parsing is faster.
+
+### Rust CLI (development) — mmap + deterministic seed
+
+For batch parsing of very large **files** without allocating a giant `Vec<u8>` up front, the Rust CLI in `rust/` uses **mmap by default**:
+
+```bash
+cd rust
+cargo build --release
+./target/release/agentjson --input huge.json --mode scale_pipeline --scale-output tape
+```
+
+- Disable mmap: `--no-mmap`
+- Reproducible beam ordering: `--deterministic-seed 42`
+
+## orjson Drop-in Shim
+
+Most LLM/agent stacks already call `orjson.loads()` everywhere. `agentjson` bundles an `orjson`-compatible shim so you can keep those call sites unchanged and still recover from “near‑JSON” outputs:
+
+```python
+import orjson
+
+data = orjson.loads(b'{"a": 1}')
+blob = orjson.dumps({"a": 1})
+```
+
+By default the shim is strict (like real `orjson`). To enable repair/scale fallback without changing call sites:
+
+```bash
+export JSONPROB_ORJSON_MODE=auto
+```
+
+See `demo/orjson_dropin_demo.py` for a concrete example.
+
+## Benchmarks
+
+Benchmarks were run on **Python 3.12.0**, **macOS 14.1 (arm64)** using `benchmarks/bench.py`.
+
+For a detailed walkthrough with concrete Slack-context examples, see `BENCHMARK.md`.
+
+### 1) LLM messy JSON suite (primary)
+
+This suite reflects the context: LLM outputs like “json입니다~ …”, markdown fences, single quotes, unquoted keys, trailing commas, Python literals, missing commas, smart quotes, and missing closers.
+
+| Library / mode | Success | Correct | Best time / case |
+|---|---:|---:|---:|
+| `json` (strict) | 0/10 | 0/10 | n/a |
+| `ujson` (strict) | 0/10 | 0/10 | n/a |
+| `orjson` (strict, real) | 0/10 | 0/10 | n/a |
+| `orjson` (auto, agentjson shim) | 10/10 | 10/10 | 45.9 µs |
+| `agentjson.parse(mode=auto)` | 10/10 | 10/10 | 39.8 µs |
+| `agentjson.parse(mode=probabilistic)` | 10/10 | 10/10 | 39.7 µs |
+
+Key point: **drop-in call sites** (`import orjson; orjson.loads(...)`) can go from *0% success* → *100% success* just by setting `JSONPROB_ORJSON_MODE=auto`.
+
+### 2) Top‑K repair suite (secondary)
+
+This suite checks whether the “intended” JSON object is recovered as the **best candidate** vs anywhere in the **Top‑K (K=5)** candidates.
+
+| Metric | Value |
+|---|---:|
+| Top‑1 hit rate | 7/8 |
+| Top‑K hit rate (K=5) | 8/8 |
+| Avg candidates returned | 1.25 |
+| Avg best confidence | 0.57 |
+| Best time / case | 92.7 µs |
+
+### 3) Large root-array parsing (big data angle)
+
+Valid JSON only (parsing a single large root array).
+
+| Library | 5 MB | 20 MB |
+|---|---:|---:|
+| `json.loads(str)` | 52.3 ms | 209.6 ms |
+| `ujson.loads(str)` | 42.2 ms | 176.1 ms |
+| `orjson.loads(bytes)` (real) | 24.6 ms | 115.9 ms |
+
+`agentjson` also benchmarks `agentjson.scale(serial|parallel)` in the same script. On 5–20MB inputs the parallel path is slower due to overhead; it’s intended for much larger payloads (GB‑scale root arrays).
+
+### 3b) Nested `corpus` split (targeted huge value)
+
+If your payload looks like `{ "corpus": [ ... huge ... ], ... }`, `benchmarks/bench.py` includes a `nested_corpus_suite` that benchmarks `scale_target_keys=["corpus"]`. This is the practical “nested huge value” case from the Slack thread.
+
+Today, nested targeting is benchmarked in `scale_output="dom"` (it records `split_mode` like `NESTED_KEY(corpus).…`). Wiring nested targeting into `scale_output="tape"` is the next step for true “huge nested value without DOM” workloads.
+
+### 3c) CLI mmap suite (PR‑006)
+
+If you care about **batch/CLI parsing of very large files** without allocating a giant `Vec<u8>` up front, set `BENCH_CLI_MMAP_MB` to run `cli_mmap_suite` (default mmap vs `--no-mmap`). You need the Rust CLI binary built first:
+
+```bash
+cd rust && cargo build --release
+```
+
+#### Reproduce
+
+Because `agentjson` provides a top-level `orjson` shim, benchmark real `orjson` and the shim in separate environments:
+
+```bash
+# Env A: real orjson
+python -m venv .venv-orjson
+source .venv-orjson/bin/activate
+python -m pip install orjson ujson
+python benchmarks/bench.py
+
+# Env B: agentjson (includes the shim)
+python -m venv .venv-agentjson
+source .venv-agentjson/bin/activate
+python -m pip install agentjson ujson
+python benchmarks/bench.py
+```
+
+Tune run sizes with env vars:
+
+```bash
+BENCH_MICRO_NUMBER=20000 BENCH_MICRO_REPEAT=5 \
+BENCH_MESSY_NUMBER=2000 BENCH_MESSY_REPEAT=5 \
+BENCH_TOPK_NUMBER=500 BENCH_TOPK_REPEAT=5 \
+BENCH_LARGE_MB=5,20 BENCH_LARGE_NUMBER=3 BENCH_LARGE_REPEAT=3 \
+BENCH_NESTED_MB=5,20 BENCH_NESTED_NUMBER=1 BENCH_NESTED_REPEAT=3 \
+BENCH_NESTED_FORCE_PARALLEL=0 \
+BENCH_CLI_MMAP_MB=512 \
+python benchmarks/bench.py
+```
 
 ## Repair Pipeline
 
@@ -159,7 +365,7 @@ Input Text
 
 For severely corrupted JSON where beam search is low-confidence, you can enable LLM-assisted repair.
 
-### Option A) Anthropic SDK (simple)
+### Option A) Anthropic SDK
 
 ```bash
 python -m pip install anthropic
@@ -168,7 +374,7 @@ export CLAUDE_MODEL=claude-3-5-sonnet-latest
 ```
 
 ```python
-from json_prob_parser import AnthropicPatchSuggestProvider, RepairOptions, parse
+from agentjson import AnthropicPatchSuggestProvider, RepairOptions, parse
 
 result = parse(
     '{"a":1,"b":2, completely broken garbage here',
@@ -185,11 +391,11 @@ print(result.metrics.llm_calls)
 print(result.metrics.llm_time_ms)
 ```
 
-### Option B) Claude Agent SDK (tools: memory, web search, skills, etc.)
+### Option B) Claude Agent SDK
 
 ```python
-from json_prob_parser import RepairOptions, parse
-from json_prob_parser.claude_agent_sdk_provider import ClaudeAgentSDKProvider
+from agentjson import RepairOptions, parse
+from agentjson.claude_agent_sdk_provider import ClaudeAgentSDKProvider
 
 # Set up your Claude Agent SDK agent
 agent = ...  # your agent instance
@@ -251,23 +457,23 @@ PYTHONPATH=src python -m unittest discover -s tests -p 'test*.py' -v
 ```bash
 cd rust
 cargo build --release
-./target/release/json-prob-parser --input ../demo/broken.json
+./target/release/agentjson --input ../demo/broken.json
 ```
 
 ## Architecture
 
 ```
-json-prob-parser/
+agentjson/
 ├── rust/                    # Core Rust library
 │   └── src/
 │       ├── heuristic.rs     # Heuristic repairs
 │       ├── beam.rs          # Beam search algorithm
-│       ├── arbiter.rs       # Main orchestration
+│       ├── pipeline.rs      # Parse pipeline orchestration
 │       └── ...
 ├── rust-pyo3/               # PyO3 Python bindings
 │   └── src/lib.rs
 └── src/json_prob_parser/    # Python package
-    ├── arbiter.py           # Python orchestrator (Rust + optional LLM)
+    ├── pipeline.py          # Python pipeline (Rust + optional LLM)
     ├── rust_core.py         # Thin PyO3 bridge
     ├── anthropic_provider.py
     ├── claude_agent_sdk_provider.py

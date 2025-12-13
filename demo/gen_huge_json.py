@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Generate large JSON demo files for json-prob-parser.
+Generate large JSON demo files for agentjson.
 
 By default this creates:
   - demo/huge_valid_array.json

@@ -1,5 +1,6 @@
+use std::io::Read;
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::beam::probabilistic_repair;
 use crate::json::{parse_strict_json, JsonValue};
@@ -71,7 +72,7 @@ fn split_command(cmd: &str) -> Vec<String> {
     out
 }
 
-fn run_llm_command(cmd: &str, input: &str) -> Result<String, String> {
+fn run_llm_command(cmd: &str, input: &str, timeout_ms: u64) -> Result<String, String> {
     let parts = split_command(cmd);
     if parts.is_empty() {
         return Err("llm_command is empty".to_string());
@@ -94,14 +95,47 @@ fn run_llm_command(cmd: &str, input: &str) -> Result<String, String> {
             .map_err(|e| format!("failed to write llm stdin: {e}"))?;
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("failed to wait for llm_command: {e}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "failed to capture llm stdout".to_string())?;
 
-    if !output.status.success() {
-        return Err(format!("llm_command exited non-zero: {}", output.status));
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<u8>, String>>();
+    std::thread::spawn(move || {
+        let mut buf: Vec<u8> = Vec::new();
+        let res = stdout
+            .read_to_end(&mut buf)
+            .map(|_| buf)
+            .map_err(|e| format!("failed to read llm stdout: {e}"));
+        let _ = tx.send(res);
+    });
+
+    let timeout = Duration::from_millis(timeout_ms);
+    let poll = Duration::from_millis(5);
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if timeout_ms > 0 && start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err("llm_command timeout".to_string());
+                }
+                std::thread::sleep(poll);
+            }
+            Err(e) => return Err(format!("failed to wait for llm_command: {e}")),
+        }
+    };
+
+    if !status.success() {
+        return Err(format!("llm_command exited non-zero: {}", status));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+
+    let out = rx
+        .recv()
+        .map_err(|_| "failed to receive llm stdout".to_string())??;
+    Ok(String::from_utf8_lossy(&out).to_string())
 }
 
 fn get_field<'a>(obj: &'a [(String, JsonValue)], key: &str) -> Option<&'a JsonValue> {
@@ -147,27 +181,43 @@ pub fn maybe_llm_rerun(
     );
     let payload_str = payload.to_compact_string();
 
-    let t0 = Instant::now();
-    let raw = run_llm_command(cmd, &payload_str)?;
-    let llm_time_ms = t0.elapsed().as_millis();
-    let parsed = match parse_jsonish(&raw) {
-        Some(v) => v,
-        None => return Ok((Vec::new(), 1, llm_time_ms, reason)),
-    };
+    let max_calls = opt.max_llm_calls_per_doc.max(1);
+    let mut llm_calls: usize = 0;
+    let mut llm_time_ms: u128 = 0;
+    let mut parsed_obj: Option<Vec<(String, JsonValue)>> = None;
+    for _ in 0..max_calls {
+        llm_calls += 1;
+        let t0 = Instant::now();
+        let raw_res = run_llm_command(cmd, &payload_str, opt.llm_timeout_ms);
+        let ms = t0.elapsed().as_millis();
+        llm_time_ms += ms;
 
-    let parsed_obj = match parsed {
-        JsonValue::Object(o) => o,
-        _ => return Ok((Vec::new(), 1, llm_time_ms, reason)),
-    };
-
-    let mode = match get_field(&parsed_obj, "mode") {
-        Some(JsonValue::String(s)) => s.clone(),
-        _ => "".to_string(),
-    };
-
-    if mode != "patch_suggest" {
-        return Ok((Vec::new(), 1, llm_time_ms, reason));
+        let raw = match raw_res {
+            Ok(s) => s,
+            Err(_) => return Ok((Vec::new(), llm_calls, llm_time_ms, reason)),
+        };
+        let parsed = match parse_jsonish(&raw) {
+            Some(v) => v,
+            None => continue,
+        };
+        let obj = match parsed {
+            JsonValue::Object(o) => o,
+            _ => continue,
+        };
+        let mode = match get_field(&obj, "mode") {
+            Some(JsonValue::String(s)) => s.as_str(),
+            _ => "",
+        };
+        if mode != "patch_suggest" {
+            continue;
+        }
+        parsed_obj = Some(obj);
+        break;
     }
+
+    let Some(parsed_obj) = parsed_obj else {
+        return Ok((Vec::new(), llm_calls, llm_time_ms, reason));
+    };
 
     let patches = match get_field(&parsed_obj, "patches") {
         Some(JsonValue::Array(a)) => a.clone(),
@@ -204,6 +254,5 @@ pub fn maybe_llm_rerun(
         }
     }
 
-    Ok((out, 1, llm_time_ms, reason))
+    Ok((out, llm_calls, llm_time_ms, reason))
 }
-

@@ -100,6 +100,7 @@ class RepairOptions:
     parallel_workers: Optional[int] = None
     parallel_backend: Literal["process", "thread"] = "process"
     scale_output: str = "dom"  # dom|tape (scale_pipeline only)
+    scale_target_keys: Optional[list[str]] = None
     partial_ok: bool = True
     allow_single_quotes: bool = True
     allow_unquoted_keys: bool = True

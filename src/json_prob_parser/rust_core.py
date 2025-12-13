@@ -6,7 +6,7 @@ HAVE_RUST = False
 _rust: Any = None
 
 try:
-    import json_prob_parser_rust as _rust  # type: ignore[import-not-found]
+    from agentjson import agentjson_rust as _rust  # type: ignore[import-not-found]
 
     HAVE_RUST = True
 except Exception:  # noqa: BLE001
@@ -18,7 +18,7 @@ def _missing_rust_error() -> RuntimeError:
     return RuntimeError(
         "Rust backend not installed. Build/install the PyO3 extension:\n"
         "  python -m pip install -U maturin\n"
-        "  maturin develop -m rust-pyo3/Cargo.toml\n"
+        "  maturin develop\n"
     )
 
 
@@ -44,4 +44,3 @@ def parse_root_array_scale(data: bytes, options: Mapping[str, Any]) -> dict:
     if not HAVE_RUST or _rust is None:
         raise _missing_rust_error()
     return _rust.parse_root_array_scale_py(data, dict(options))
-

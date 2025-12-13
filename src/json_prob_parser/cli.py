@@ -7,7 +7,7 @@ from dataclasses import asdict
 from typing import Optional
 
 from .anthropic_provider import AnthropicPatchSuggestProvider
-from .arbiter import parse
+from .pipeline import parse
 from .types import RepairOptions
 
 
@@ -26,7 +26,7 @@ def _read_input_bytes(path: Optional[str]) -> bytes:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    p = argparse.ArgumentParser(prog="json-prob-parser")
+    p = argparse.ArgumentParser()
     p.add_argument("--input", "-i", default="-", help="Input file (default: stdin)")
     p.add_argument("--mode", default="auto", help="auto|strict_only|fast_repair|probabilistic|scale_pipeline")
     p.add_argument("--scale-output", default="dom", choices=["dom", "tape"], help="scale_pipeline output: dom|tape")

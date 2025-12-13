@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import time
+import queue
+import threading
 from dataclasses import asdict
 from typing import Any, Mapping, Optional, Sequence, Tuple, Union
 
@@ -23,11 +25,42 @@ from .types import (
 )
 
 
+def _call_with_timeout(fn: Any, payload: dict[str, Any], timeout_ms: int) -> Any:
+    if timeout_ms <= 0:
+        return fn(payload)
+
+    q: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+    def runner() -> None:
+        try:
+            q.put(("ok", fn(payload)))
+        except Exception as e:  # noqa: BLE001
+            q.put(("err", e))
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+
+    try:
+        kind, val = q.get(timeout=(timeout_ms / 1000.0))
+    except queue.Empty as e:
+        raise TimeoutError(f"llm_provider timeout after {timeout_ms}ms") from e
+
+    if kind == "err":
+        raise val
+    return val
+
+
 def _coerce_input_bytes(input_text_or_bytes: Union[str, bytes]) -> bytes:
     if isinstance(input_text_or_bytes, bytes):
-        # Keep offsets stable with Rust's from_utf8_lossy behavior.
-        text = input_text_or_bytes.decode("utf-8", errors="replace")
-        return text.encode("utf-8", errors="strict")
+        # Fast path: keep bytes as-is when they are valid UTF-8.
+        # This avoids an O(n) decode+encode roundtrip for large payloads.
+        try:
+            input_text_or_bytes.decode("utf-8", errors="strict")
+            return input_text_or_bytes
+        except UnicodeDecodeError:
+            # Keep offsets stable with Rust's from_utf8_lossy behavior.
+            text = input_text_or_bytes.decode("utf-8", errors="replace")
+            return text.encode("utf-8", errors="strict")
     if isinstance(input_text_or_bytes, str):
         return input_text_or_bytes.encode("utf-8", errors="strict")
     raise TypeError("input must be str or bytes")
@@ -254,23 +287,37 @@ def parse(input_text_or_bytes: Union[str, bytes], options: Optional[RepairOption
         span_window=1200,
     )
 
-    t0 = time.perf_counter()
-    try:
-        llm_raw = opt.llm_provider(dict(payload)) if opt.llm_provider is not None else None
-    except Exception:  # noqa: BLE001
-        llm_ms = int((time.perf_counter() - t0) * 1000)
-        result.metrics.llm_calls = 1
-        result.metrics.llm_time_ms = llm_ms
-        result.metrics.llm_trigger = trigger
-        return result
-    llm_ms = int((time.perf_counter() - t0) * 1000)
+    llm_calls = 0
+    llm_total_ms = 0
+    llm_parsed: Any = None
+    llm_mode = ""
+    for _ in range(max(1, int(opt.max_llm_calls_per_doc))):
+        llm_calls += 1
+        t0 = time.perf_counter()
+        try:
+            llm_raw = (
+                _call_with_timeout(opt.llm_provider, dict(payload), int(opt.llm_timeout_ms))
+                if opt.llm_provider is not None
+                else None
+            )
+        except Exception:  # noqa: BLE001
+            llm_total_ms += int((time.perf_counter() - t0) * 1000)
+            result.metrics.elapsed_ms = int(result.metrics.elapsed_ms) + extra_parse_ms
+            result.metrics.llm_calls = llm_calls
+            result.metrics.llm_time_ms = llm_total_ms
+            result.metrics.llm_trigger = trigger
+            return result
+        llm_total_ms += int((time.perf_counter() - t0) * 1000)
 
-    llm_parsed = _parse_jsonish(llm_raw)
-    llm_mode = str(llm_parsed.get("mode") or "") if isinstance(llm_parsed, Mapping) else ""
+        llm_parsed = _parse_jsonish(llm_raw)
+        llm_mode = str(llm_parsed.get("mode") or "") if isinstance(llm_parsed, Mapping) else ""
+        if isinstance(llm_parsed, Mapping) and llm_mode in ("patch_suggest", "token_suggest"):
+            break
+
     if not isinstance(llm_parsed, Mapping) or llm_mode not in ("patch_suggest", "token_suggest"):
         result.metrics.elapsed_ms = int(result.metrics.elapsed_ms) + extra_parse_ms
-        result.metrics.llm_calls = 1
-        result.metrics.llm_time_ms = llm_ms
+        result.metrics.llm_calls = llm_calls
+        result.metrics.llm_time_ms = llm_total_ms
         result.metrics.llm_trigger = trigger
         return result
 
@@ -362,8 +409,8 @@ def parse(input_text_or_bytes: Union[str, bytes], options: Optional[RepairOption
             result.partial = None
 
     result.metrics.elapsed_ms = int(result.metrics.elapsed_ms) + extra_parse_ms
-    result.metrics.llm_calls = 1
-    result.metrics.llm_time_ms = llm_ms
+    result.metrics.llm_calls = llm_calls
+    result.metrics.llm_time_ms = llm_total_ms
     result.metrics.llm_trigger = trigger
 
     return result

@@ -24,6 +24,7 @@ fn code_fence_extract() {
     opt.debug = true;
     let r = json_prob_parser::parse("preface```json\n{\"a\":1}\n```suffix", &opt);
     assert!(r.status == "repaired" || r.status == "strict_ok");
+    assert!(r.debug.is_some());
     let best = r.best().unwrap();
     let v = best.value.as_ref().unwrap();
     assert_eq!(get_obj_field(v, "a"), Some(&JsonValue::NumberI64(1)));
@@ -59,6 +60,23 @@ fn probabilistic_unquoted_key_and_single_quotes() {
     let best = r.best().unwrap();
     let v = best.value.as_ref().unwrap();
     assert_eq!(get_obj_field(v, "a"), Some(&JsonValue::String("b".to_string())));
+}
+
+#[test]
+fn probabilistic_is_reproducible_with_deterministic_seed() {
+    let data = br#"{"a":1,"b":2, nonsense nonsense"#;
+    let mut opt = RepairOptions::default();
+    opt.mode = "probabilistic".to_string();
+    opt.top_k = 5;
+    opt.allow_llm = false;
+    opt.deterministic_seed = 42;
+
+    let r1 = json_prob_parser::parse_bytes(data, &opt);
+    let r2 = json_prob_parser::parse_bytes(data, &opt);
+
+    let n1: Vec<Option<String>> = r1.candidates.iter().map(|c| c.normalized_json.clone()).collect();
+    let n2: Vec<Option<String>> = r2.candidates.iter().map(|c| c.normalized_json.clone()).collect();
+    assert_eq!(n1, n2);
 }
 
 #[test]
@@ -184,6 +202,65 @@ fn scale_pipeline_tape_output_root_array() {
 }
 
 #[test]
+fn auto_scale_root_array() {
+    let data = b"[1, 2, 3]";
+    let mut opt = RepairOptions::default();
+    opt.mode = "auto".to_string();
+    opt.allow_parallel = "true".to_string();
+    opt.parallel_threshold_bytes = 0;
+    opt.min_elements_for_parallel = 1;
+    opt.parallel_workers = Some(2);
+    opt.parallel_chunk_bytes = 1;
+
+    let r = json_prob_parser::parse_bytes(data, &opt);
+    assert_eq!(r.status, "strict_ok");
+    assert_eq!(r.metrics.mode_used, "auto_scale");
+    assert_eq!(r.metrics.split_mode, "ROOT_ARRAY_ELEMENTS");
+    let best = r.best().unwrap();
+    assert_eq!(
+        best.value.as_ref().unwrap(),
+        &JsonValue::Array(vec![
+            JsonValue::NumberI64(1),
+            JsonValue::NumberI64(2),
+            JsonValue::NumberI64(3),
+        ])
+    );
+}
+
+#[test]
+fn scale_pipeline_nested_target_key_split() {
+    let data = br#"{"corpus":[1,2,3,4,5,6], "x": 0}"#;
+    let mut opt = RepairOptions::default();
+    opt.mode = "scale_pipeline".to_string();
+    opt.scale_target_keys = Some(vec!["corpus".to_string()]);
+    opt.allow_parallel = "true".to_string();
+    opt.parallel_backend = "thread".to_string();
+    opt.min_elements_for_parallel = 1;
+    opt.parallel_threshold_bytes = 0;
+    opt.parallel_workers = Some(2);
+    opt.parallel_chunk_bytes = 1;
+
+    let r = json_prob_parser::parse_bytes(data, &opt);
+    assert_eq!(r.status, "strict_ok");
+    assert!(r.metrics.split_mode.starts_with("NESTED_KEY(corpus)."));
+
+    let best = r.best().unwrap();
+    let v = best.value.as_ref().unwrap();
+    assert_eq!(
+        get_obj_field(v, "corpus"),
+        Some(&JsonValue::Array(vec![
+            JsonValue::NumberI64(1),
+            JsonValue::NumberI64(2),
+            JsonValue::NumberI64(3),
+            JsonValue::NumberI64(4),
+            JsonValue::NumberI64(5),
+            JsonValue::NumberI64(6),
+        ]))
+    );
+    assert_eq!(get_obj_field(v, "x"), Some(&JsonValue::NumberI64(0)));
+}
+
+#[test]
 fn llm_deep_repair_patch_suggest() {
     let data = br#"{"a":1,"b":2, nonsense nonsense"#;
     let mut opt = RepairOptions::default();
@@ -204,4 +281,24 @@ fn llm_deep_repair_patch_suggest() {
     let v = best.value.as_ref().unwrap();
     assert_eq!(get_obj_field(v, "a"), Some(&JsonValue::NumberI64(1)));
     assert_eq!(get_obj_field(v, "b"), Some(&JsonValue::NumberI64(2)));
+}
+
+#[test]
+fn llm_command_timeout() {
+    let data = br#"{"a":1,"b":2, nonsense nonsense"#;
+    let mut opt = RepairOptions::default();
+    opt.mode = "probabilistic".to_string();
+    opt.allow_llm = true;
+    opt.max_llm_calls_per_doc = 1;
+    opt.llm_mode = "patch_suggest".to_string();
+    opt.llm_min_confidence = 1.1;
+    opt.llm_timeout_ms = 20;
+    opt.llm_command = Some(
+        "python3 -c \"import time; time.sleep(1); print('{}')\"".to_string(),
+    );
+
+    let r = json_prob_parser::parse_bytes(data, &opt);
+    assert_eq!(r.metrics.llm_calls, 1);
+    assert!(r.metrics.llm_time_ms < 500);
+    assert_eq!(r.metrics.llm_trigger, Some("low_confidence".to_string()));
 }

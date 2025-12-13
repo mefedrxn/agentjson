@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
@@ -8,8 +9,8 @@ from json_prob_parser import RepairOptions, apply_patch_ops_utf8, parse  # noqa:
 from json_prob_parser import rust_core  # noqa: E402
 
 
-@unittest.skipUnless(rust_core.HAVE_RUST, "Rust PyO3 extension (json_prob_parser_rust) not installed")
-class TestArbiterParse(unittest.TestCase):
+@unittest.skipUnless(rust_core.HAVE_RUST, "Rust PyO3 extension (agentjson_rust) not installed")
+class TestPipelineParse(unittest.TestCase):
     def test_strict_ok(self):
         r = parse('{"a":1}')
         self.assertEqual(r.status, "strict_ok")
@@ -19,6 +20,7 @@ class TestArbiterParse(unittest.TestCase):
         r = parse("preface```json\n{\"a\":1}\n```suffix", RepairOptions(debug=True))
         self.assertIn(r.status, ("repaired", "strict_ok"))
         self.assertEqual(r.best.value["a"], 1)
+        self.assertIsNotNone(r.debug)
 
     def test_trailing_comma_heuristic(self):
         r = parse('{"a":1,}')
@@ -68,6 +70,26 @@ class TestArbiterParse(unittest.TestCase):
         self.assertEqual(r.status, "strict_ok")
         self.assertEqual(r.best.value, [1, 2, 3])
 
+    def test_scale_pipeline_nested_target_key_split(self):
+        data = b'{"corpus":[1,2,3,4,5,6], "x": 0}'
+        r = parse(
+            data,
+            RepairOptions(
+                mode="scale_pipeline",
+                scale_target_keys=["corpus"],
+                allow_parallel=True,
+                parallel_backend="thread",
+                min_elements_for_parallel=1,
+                parallel_threshold_bytes=0,
+                parallel_workers=2,
+                parallel_chunk_bytes=1,
+            ),
+        )
+        self.assertEqual(r.status, "strict_ok")
+        self.assertEqual(r.best.value["corpus"], [1, 2, 3, 4, 5, 6])
+        self.assertEqual(r.best.value["x"], 0)
+        self.assertTrue(str(r.metrics.split_mode).startswith("NESTED_KEY(corpus)."))
+
     def test_llm_deep_repair_patch_suggest(self):
         # Force an LLM call by using a high llm_min_confidence threshold.
         def provider(payload):
@@ -103,6 +125,25 @@ class TestArbiterParse(unittest.TestCase):
         self.assertIn(r.status, ("repaired", "partial"))
         self.assertEqual(r.best.value["a"], 1)
         self.assertEqual(r.best.value["b"], 2)
+
+    def test_llm_timeout(self):
+        def slow_provider(_payload):
+            time.sleep(0.2)
+            return {"mode": "patch_suggest", "patches": []}
+
+        r = parse(
+            '{"a":1,"b":2, nonsense nonsense',
+            RepairOptions(
+                mode="probabilistic",
+                allow_llm=True,
+                llm_mode="patch_suggest",
+                llm_min_confidence=1.1,
+                llm_timeout_ms=10,
+                llm_provider=slow_provider,
+            ),
+        )
+        self.assertEqual(r.metrics.llm_calls, 1)
+        self.assertEqual(r.metrics.llm_trigger, "low_confidence")
 
 
 class TestLLMUtils(unittest.TestCase):

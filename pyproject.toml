@@ -1,23 +1,50 @@
 [build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
 
 [project]
-name = "json-prob-parser"
+name = "agentjson"
 version = "0.1.0"
-description = "Arbiter probabilistic JSON repair (Top-K) with fast-path strict parse"
+description = "Probabilistic JSON repair library powered by Rust - fixes broken JSON from LLMs"
 readme = "README.md"
 requires-python = ">=3.9"
+license = {text = "MIT OR Apache-2.0"}
+authors = [
+    {name = "agentjson contributors"}
+]
+keywords = ["json", "parser", "repair", "llm", "probabilistic", "beam-search", "orjson"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: General",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+]
 dependencies = []
 
 [project.optional-dependencies]
 anthropic = ["anthropic"]
 
+[project.urls]
+Homepage = "https://github.com/sionic-ai/agentjson"
+Repository = "https://github.com/sionic-ai/agentjson"
+Documentation = "https://github.com/sionic-ai/agentjson#readme"
+
 [project.scripts]
+agentjson = "json_prob_parser.cli:main"
 json-prob-parser = "json_prob_parser.cli:main"
 
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.maturin]
+# Mixed Rust+Python project
+python-source = "src"
+module-name = "agentjson.agentjson_rust"
+manifest-path = "Cargo.toml"
