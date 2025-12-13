@@ -81,6 +81,8 @@ uv pip install -e .
 
 ## Quick Start
 
+![explanation](./assets/explanation.jpg)
+
 ### Python Library
 
 ```python
