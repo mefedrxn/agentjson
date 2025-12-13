@@ -1,4 +1,5 @@
 # agentjson
+![logo](./assets/logo.jpg)
 
 ## JSON parser in Rust with automatic fix for agent‑generated outputs
 
