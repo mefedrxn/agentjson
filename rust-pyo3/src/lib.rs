@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
-use pyo3::buffer::PyBuffer;
-use pyo3::types::{PyByteArray, PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use pyo3::IntoPyObjectExt;
+use std::borrow::Cow;
 
 use json_prob_parser::beam;
 use json_prob_parser::json::JsonValue;
@@ -36,57 +36,23 @@ fn json_to_py(py: Python<'_>, v: &JsonValue) -> PyObject {
 
 #[pyfunction]
 fn strict_loads_py(py: Python<'_>, input: &Bound<'_, PyAny>) -> PyResult<PyObject> {
-    let parsed = if let Ok(s) = input.extract::<&str>() {
-        strict::strict_parse(s)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err((e.message, e.pos)))?
-    } else if let Ok(b) = input.downcast::<PyBytes>() {
-        let s = std::str::from_utf8(b.as_bytes()).map_err(|_| {
+    let parsed = if let Ok(s) = input.extract::<Cow<str>>() {
+        strict::strict_parse(s.as_ref())
+    } else if let Ok(b) = input.extract::<Cow<[u8]>>() {
+        let s = std::str::from_utf8(b.as_ref()).map_err(|_| {
             pyo3::exceptions::PyValueError::new_err((
                 "str is not valid UTF-8: surrogates not allowed".to_string(),
                 0_usize,
             ))
         })?;
         strict::strict_parse(s)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err((e.message, e.pos)))?
-    } else if let Ok(ba) = input.downcast::<PyByteArray>() {
-        let parsed = {
-            // SAFETY: We do not call back into Python while using this slice.
-            let bytes = unsafe { ba.as_bytes() };
-            let s = std::str::from_utf8(bytes).map_err(|_| {
-                pyo3::exceptions::PyValueError::new_err((
-                    "str is not valid UTF-8: surrogates not allowed".to_string(),
-                    0_usize,
-                ))
-            })?;
-            strict::strict_parse(s)
-        };
-        parsed.map_err(|e| pyo3::exceptions::PyValueError::new_err((e.message, e.pos)))?
-    } else if let Ok(buf) = PyBuffer::<u8>::get(input) {
-        let parsed = {
-            let cells = buf.as_slice(py).ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err((
-                    "input buffer must be C-contiguous".to_string(),
-                    0_usize,
-                ))
-            })?;
-
-            // ReadOnlyCell<u8> is repr(transparent) over UnsafeCell<u8>, so this is safe.
-            let bytes = unsafe { std::slice::from_raw_parts(cells.as_ptr() as *const u8, cells.len()) };
-            let s = std::str::from_utf8(bytes).map_err(|_| {
-                pyo3::exceptions::PyValueError::new_err((
-                    "str is not valid UTF-8: surrogates not allowed".to_string(),
-                    0_usize,
-                ))
-            })?;
-            strict::strict_parse(s)
-        };
-        parsed.map_err(|e| pyo3::exceptions::PyValueError::new_err((e.message, e.pos)))?
     } else {
         return Err(pyo3::exceptions::PyValueError::new_err((
             "input must be bytes, bytearray, memoryview, or str".to_string(),
             0_usize,
         )));
-    };
+    }
+    .map_err(|e| pyo3::exceptions::PyValueError::new_err((e.message, e.pos)))?;
 
     Ok(json_to_py(py, &parsed))
 }

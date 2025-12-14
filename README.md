@@ -56,6 +56,8 @@ uv add agentjson
 # or: python -m pip install agentjson
 ```
 
+Note: `agentjson` ships **abi3** wheels (Python **3.9+**) so the same wheel works across CPython versions (e.g. 3.11, 3.12).
+
 ### Build from source (development)
 
 #### 1) Install Rust toolchain
