@@ -56,6 +56,8 @@ uv add agentjson
 # or: python -m pip install agentjson
 ```
 
+Note: `agentjson` ships **abi3** wheels (Python **3.9+**) so the same wheel works across CPython versions (e.g. 3.11, 3.12).
+
 ### Build from source (development)
 
 #### 1) Install Rust toolchain
@@ -221,15 +223,21 @@ cargo build --release
 - Disable mmap: `--no-mmap`
 - Reproducible beam ordering: `--deterministic-seed 42`
 
-## orjson Drop-in Shim
+## orjson Drop-in
 
-Most LLM/agent stacks already call `orjson.loads()` everywhere. `agentjson` bundles an `orjson`-compatible shim so you can keep those call sites unchanged and still recover from “near‑JSON” outputs:
+Most LLM/agent stacks already call `orjson.loads()` everywhere. `agentjson` provides an `orjson`-compatible drop-in module so you can keep those call sites unchanged and still recover from “near‑JSON” outputs:
 
 ```python
 import orjson
 
 data = orjson.loads(b'{"a": 1}')
 blob = orjson.dumps({"a": 1})
+```
+
+If you prefer to be explicit (or want to avoid `orjson` name conflicts), you can also do:
+
+```python
+import agentjson as orjson
 ```
 
 By default the shim is strict (like real `orjson`). To enable repair/scale fallback without changing call sites:
@@ -255,9 +263,9 @@ This suite reflects the context: LLM outputs like “json입니다~ …”, mark
 | `json` (strict) | 0/10 | 0/10 | n/a |
 | `ujson` (strict) | 0/10 | 0/10 | n/a |
 | `orjson` (strict, real) | 0/10 | 0/10 | n/a |
-| `orjson` (auto, agentjson shim) | 10/10 | 10/10 | 45.9 µs |
-| `agentjson.parse(mode=auto)` | 10/10 | 10/10 | 39.8 µs |
-| `agentjson.parse(mode=probabilistic)` | 10/10 | 10/10 | 39.7 µs |
+| `agentjson` (drop-in `orjson.loads`, mode=auto) | 10/10 | 10/10 | 23.5 µs |
+| `agentjson.parse(mode=auto)` | 10/10 | 10/10 | 19.5 µs |
+| `agentjson.parse(mode=probabilistic)` | 10/10 | 10/10 | 19.5 µs |
 
 Key point: **drop-in call sites** (`import orjson; orjson.loads(...)`) can go from *0% success* → *100% success* just by setting `JSONPROB_ORJSON_MODE=auto`.
 
@@ -271,7 +279,7 @@ This suite checks whether the “intended” JSON object is recovered as the **b
 | Top‑K hit rate (K=5) | 8/8 |
 | Avg candidates returned | 1.25 |
 | Avg best confidence | 0.57 |
-| Best time / case | 92.7 µs |
+| Best time / case | 38.2 µs |
 
 ### 3) Large root-array parsing (big data angle)
 
@@ -279,11 +287,11 @@ Valid JSON only (parsing a single large root array).
 
 | Library | 5 MB | 20 MB |
 |---|---:|---:|
-| `json.loads(str)` | 52.3 ms | 209.6 ms |
-| `ujson.loads(str)` | 42.2 ms | 176.1 ms |
-| `orjson.loads(bytes)` (real) | 24.6 ms | 115.9 ms |
+| `json.loads(str)` | 53.8 ms | 217.2 ms |
+| `ujson.loads(str)` | 45.9 ms | 173.7 ms |
+| `orjson.loads(bytes)` (real) | 27.0 ms | 116.2 ms |
 
-`agentjson` also benchmarks `agentjson.scale(serial|parallel)` in the same script. On 5–20MB inputs the parallel path is slower due to overhead; it’s intended for much larger payloads (GB‑scale root arrays).
+`agentjson` also benchmarks `agentjson.scale(serial|parallel)` in the same script. On 5–20MB inputs the crossover depends on your machine: on this run the parallel path is slower at 5MB and slightly faster at 20MB; it’s intended for much larger payloads (GB‑scale root arrays).
 
 ### 3b) Nested `corpus` split (targeted huge value)
 

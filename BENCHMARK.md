@@ -10,7 +10,7 @@ This document explains what `benchmarks/bench.py` measures and **why** the suite
 
 ## How to run
 
-Because `agentjson` ships a top-level `orjson` shim, you must use **two separate environments** if you want to compare with the real `orjson` package:
+Because `agentjson` provides a top-level `orjson` drop-in module, you must use **two separate environments** if you want to compare with the real `orjson` package:
 
 ```bash
 # Env A: real orjson
@@ -46,6 +46,19 @@ python benchmarks/bench.py
   - It uses `/usr/bin/time` when available to capture max RSS.
 - **PR‑101 (parallel delimiter indexer)**: use `large_root_array_suite` and increase `BENCH_LARGE_MB` (e.g. `200,1000`) to find the crossover where parallel indexing starts paying off.
 - **PR‑102 (nested huge value / corpus)**: use `nested_corpus_suite` to benchmark `scale_target_keys=["corpus"]` with `allow_parallel` on/off.
+
+### Example: CLI mmap suite (PR‑006)
+
+On macOS this suite records **wall time** (the `/usr/bin/time -v` max-RSS path is Linux-friendly).
+
+Example run (Env B, `BENCH_CLI_MMAP_MB=256`, 2025-12-14):
+
+| Mode | Elapsed |
+|---|---:|
+| `mmap(default)` | 1.27 s |
+| `read(--no-mmap)` | 1.38 s |
+
+Interpretation: mmap’s main win is avoiding **upfront heap allocation / extra copies** on huge files; it may or may not be faster depending on OS page cache and IO patterns.
 
 ## Suite 1 — LLM messy JSON suite (primary)
 
@@ -93,7 +106,7 @@ With `agentjson` as an `orjson` drop-in (same call site):
 
 ```python
 import os
-import orjson  # agentjson shim
+import orjson  # provided by agentjson (drop-in)
 
 os.environ["JSONPROB_ORJSON_MODE"] = "auto"
 orjson.loads('preface```json\n{"a":1}\n```suffix')   # -> {"a": 1}
@@ -101,16 +114,16 @@ orjson.loads('preface```json\n{"a":1}\n```suffix')   # -> {"a": 1}
 
 This is the core PR pitch: **don’t change code**, just switch the package and flip a mode when needed.
 
-### Example results (2025-12-13, Python 3.12.0, macOS 14.1 arm64)
+### Example results (2025-12-14, Python 3.12.0, macOS 14.1 arm64)
 
 | Library / mode | Success | Correct | Best time / case |
 |---|---:|---:|---:|
 | `json` (strict) | 0/10 | 0/10 | n/a |
 | `ujson` (strict) | 0/10 | 0/10 | n/a |
 | `orjson` (strict, real) | 0/10 | 0/10 | n/a |
-| `orjson` (auto, agentjson shim) | 10/10 | 10/10 | 45.9 µs |
-| `agentjson.parse(mode=auto)` | 10/10 | 10/10 | 39.8 µs |
-| `agentjson.parse(mode=probabilistic)` | 10/10 | 10/10 | 39.7 µs |
+| `agentjson` (drop-in `orjson.loads`, mode=auto) | 10/10 | 10/10 | 23.5 µs |
+| `agentjson.parse(mode=auto)` | 10/10 | 10/10 | 19.5 µs |
+| `agentjson.parse(mode=probabilistic)` | 10/10 | 10/10 | 19.5 µs |
 
 ## Suite 2 — Top‑K repair suite (secondary)
 
@@ -145,7 +158,7 @@ In the benchmark run, this case shows up exactly as:
 - **Top‑1 hit** misses (not the expected value),
 - but **Top‑K hit (K=5)** succeeds (the expected value is present in the candidate list).
 
-### Example results (2025-12-13, Python 3.12.0, macOS 14.1 arm64)
+### Example results (2025-12-14, Python 3.12.0, macOS 14.1 arm64)
 
 | Metric | Value |
 |---|---:|
@@ -153,7 +166,7 @@ In the benchmark run, this case shows up exactly as:
 | Top‑K hit rate (K=5) | 8/8 |
 | Avg candidates returned | 1.25 |
 | Avg best confidence | 0.57 |
-| Best time / case | 92.7 µs |
+| Best time / case | 38.2 µs |
 
 ## Suite 3 — Large root-array parsing (big data angle)
 
@@ -169,15 +182,15 @@ and measures how long `loads(...)` takes for sizes like 5MB and 20MB.
 
 For comparing `json/ujson/orjson`, use **Env A (real orjson)**. In Env B, `import orjson` is the shim.
 
-### Example results (Env A: real `orjson`, 2025-12-13)
+### Example results (Env A: real `orjson`, 2025-12-14)
 
 | Library | 5 MB | 20 MB |
 |---|---:|---:|
-| `json.loads(str)` | 52.3 ms | 209.6 ms |
-| `ujson.loads(str)` | 42.2 ms | 176.1 ms |
-| `orjson.loads(bytes)` (real) | 24.6 ms | 115.9 ms |
+| `json.loads(str)` | 53.8 ms | 217.2 ms |
+| `ujson.loads(str)` | 45.9 ms | 173.7 ms |
+| `orjson.loads(bytes)` (real) | 27.0 ms | 116.2 ms |
 
-`benchmarks/bench.py` also measures `agentjson.scale(serial|parallel)` (Env B). On 5–20MB inputs the parallel path is slower due to overhead; it’s intended for much larger payloads (GB‑scale root arrays).
+`benchmarks/bench.py` also measures `agentjson.scale(serial|parallel)` (Env B). On 5–20MB inputs the crossover depends on your machine; it’s intended for much larger payloads (GB‑scale root arrays).
 
 ## Suite 3b — Nested `corpus` suite (targeted huge value)
 
@@ -202,4 +215,3 @@ Important nuance:
 
 - This suite uses **DOM** mode (`scale_output="dom"`) so `split_mode` shows whether nested targeting triggered (see `rust/src/scale.rs::try_nested_target_split`).
 - Wiring nested targeting into **tape** mode (`scale_output="tape"`) is the next-step work for true “huge nested value without DOM” workloads.
-
